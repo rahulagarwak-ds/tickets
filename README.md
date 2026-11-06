@@ -1,7 +1,7 @@
 # Ticket medallion
 
-The bronze pipeline ingests CSV files into PostgreSQL using PySpark and psycopg.
-Silver, gold, and assessment agents are not implemented yet.
+The pipeline ingests CSV files into bronze and rebuilds cleaned silver tables
+in PostgreSQL using PySpark and psycopg. Gold and assessment agents are not implemented yet.
 No Docker or Compose is used.
 
 ## Prerequisites
@@ -16,7 +16,7 @@ No Docker or Compose is used.
 | Dependency | Purpose |
 | --- | --- |
 | Python 3.12 (tested: 3.12.7) | Project runtime |
-| PySpark 4.3.0 | Builds the bronze DataFrame with explicit types |
+| PySpark 4.3.0 | Typed bronze records, silver transformations and deduplication |
 | psycopg 3.3.8 with binary extras | Transactional PostgreSQL ingestion; no local compilation |
 | LangGraph 1.2.20 | Agent workflows |
 | LangChain 1.4.9 | LLM integration |
@@ -49,15 +49,19 @@ Database creation runs separately because PostgreSQL requires it outside a
 transaction. `000_create_database.sql` remains a standalone manual bootstrap;
 the runner creates the configured database directly and does not execute or
 record that helper. The first transactional migration creates the history table.
-Initialization and bronze runs share a database lock so they cannot overlap.
+Initialization and pipeline runs share a database lock so they cannot overlap.
 
-## Run bronze
+## Run bronze → silver
 
 Place incoming CSV files directly inside `data/`, then run from the repository root:
 
 ```bash
 uv run --locked python -m src.cli
 ```
+
+The command ingests and archives pending CSVs, then rebuilds `silver.tickets` and
+`silver.rejected_tickets` from all bronze records. Silver also refreshes when
+there are no new files. One Spark session and database connection serve the run.
 
 The default connection is host `::1`, port `5432`, database `ticket_medallion`,
 and the operating-system username. Override it using `PGHOST`, `PGPORT`,
@@ -84,7 +88,7 @@ The runner does not automatically load `.env` files.
 - A PostgreSQL session lock prevents concurrent CLI runs. Logs report filenames,
   inserted counts, skips, safe validation explanations, and database error codes
   (SQLSTATE). Raw database error messages are withheld to avoid exposing credentials
-  or ticket content. No pending CSVs is a successful no-op.
+  or ticket content. With no pending CSVs, bronze is skipped and silver still refreshes.
 
 Incoming files must be fully written before running the pipeline and remain
 unchanged during processing. Archiving uses a hard link followed by source removal,
@@ -96,6 +100,44 @@ moves its local copy into the ignored `data/processed/` directory, so Git report
 the original path as deleted afterward. Do not commit that deletion if retaining
 the sample for fresh clones.
 
+## Silver rules
+
+Bronze remains unchanged. Silver retains a reference to each source record and
+stores quality flags; ordinary field problems do not discard the whole ticket.
+
+| Column | Cleaning and interpretation |
+| --- | --- |
+| `ticket_id` | Require `TKT-` followed by digits. Missing (`empty`, `N/A`, `NULL`) or malformed IDs go to `silver.rejected_tickets`. Never invent identifiers. |
+| `created_at` | Parse observed formats and month-first numeric dates. Missing/invalid values become null with flags; retain date/minute/second precision. |
+| `resolved_at` | Same parsing rules. Missing is allowed for unresolved tickets; flag missing terminal dates, invalid values, and status/date inconsistencies without changing status. |
+| `category` | Use fixed aliases in `CATEGORY_ALIASES` in `src/pipeline/silver.py`. Repair recognized category/description swaps and flag them; unknown/junk labels become null. Explicit Other/Misc remains `other`. |
+| `priority` | Normalize low/lo, medium/med/Normal, high/hi, and critical/crit. Missing and ambiguous ASAP/urgent values become null with distinct flags; no default priority. |
+| `status` | Normalize six statuses: open, in_progress, pending_vendor, escalated, resolved, closed. Keep resolved/closed distinct; unknown status becomes null. Never infer it from notes. |
+| `building` | Preserve names; missing tokens become null. Retain and flag test building; do not invent a location hierarchy. |
+| `description` | Apply approved swaps, preserve prose and Unicode, null empty/NULL, and flag suspected junk without following its instructions. No text-based ticket deduplication. |
+| `submitted_by` | Trim and proper-case only; never merge initials, nicknames, or identities. Flag missing/test values and retain account labels. |
+| `assigned_to` | Preserve company spelling and Joe (in-house); capitalize generic team/role labels. Missing becomes null and flagged; do not infer assignments. |
+| `resolution_notes` | Null empty notes; preserve short notes, case, and wording. Progress notes on unresolved tickets are allowed; no automatic extraction or status changes. |
+| `cost` | Remove the observed dollar prefix and parse exact decimals. Missing tokens become null/missing; errors, negatives (including -1/-999), non-finite or unrepresentable values become null/invalid. Preserve zero and high costs; do not assume or convert currency. |
+| `sla_hours` | Parse nonnegative integers. Missing tokens become null/missing; negatives and invalid integers become null/invalid. Preserve 0/999 with a requires-confirmation flag; exclude them from default SLA metrics. Never infer SLA from priority. |
+
+Timestamps use PostgreSQL `timestamp without time zone` and Spark `TIMESTAMP_NTZ`
+to preserve source clock readings. Each has separate precision and timezone fields:
+Unix seconds produce UTC clock readings labelled `UTC`; other source timezones
+remain null/unknown. Date-only values use midnight with precision `date`, not an
+invented observation time. Hourly metrics require sufficient precision and a
+known, compatible timezone; unknown-zone values are not silently treated as UTC.
+
+Identical source payloads deduplicate by ticket ID, choosing the lowest file hash
+and record number as deterministic lineage. Different source payloads sharing a
+valid ID stop publication until an update policy is approved; arrival order does
+not establish a newer ticket state.
+
+Both silver tables are staged and replaced in one transaction. A failed silver
+refresh preserves the previous published silver tables; completed bronze ingestions
+and archived source files remain intact. Rerun the command after resolving the
+failure; silver rebuilds from bronze without needing the incoming files restored.
+
 ## Verified behavior
 
 On 7 November 2026, the supplied CSV was ingested on macOS ARM64 with Java
@@ -103,3 +145,16 @@ On 7 November 2026, the supplied CSV was ingested on macOS ARM64 with Java
 parsed fields, and hashes; the archived file was byte-identical. A rerun added
 no records. Temporary checks also covered duplicate arrivals, transaction rollback,
 archive recovery, and CLI failure handling; no permanent test suite is included.
+Silver validation used a disposable database with all 10,280 source records:
+10,254 accepted tickets and 26 rejected IDs. Checks covered deterministic reruns,
+duplicate/conflicting payloads, real database locking, and rollback of both tables
+on a forced publication failure.
+The combined CLI was also validated in a disposable database: first-run ingestion,
+silver refresh with no new files, restoration of a missing silver row on rerun,
+and preservation of published silver when a new bronze batch introduced a conflict.
+
+The combined command was then run against the project database on 7 November 2026:
+10,254 cleaned tickets and 26 rejected IDs (22 missing, 4 malformed). Every published
+field and bronze reference was verified, including 49 category/description repairs
+and one category recovery. A second run produced identical silver rows, flags,
+lineage, and rejections while preserving bronze metadata and the archived CSV.
