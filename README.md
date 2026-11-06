@@ -8,8 +8,8 @@ No Docker or Compose is used.
 
 - uv; Python 3.12 is selected through `.python-version` and `pyproject.toml`.
 - Java 17 or 21 on `PATH`, or a valid `JAVA_HOME`.
-- A running PostgreSQL server, the `ticket_medallion` database, and the tables
-  defined in `src/migrations/001_initial_bronze.sql`. Initialization is currently manual.
+- A running PostgreSQL server. Initial setup requires a user with permission to
+  create the project database and schemas, and access to the `postgres` maintenance database.
 
 ## Dependencies
 
@@ -30,6 +30,26 @@ Install the Python dependencies:
 ```bash
 uv sync --locked
 ```
+
+## Initialize the database
+
+Run from the repository root:
+
+```bash
+uv run --locked python -m src.migrations.runner
+```
+
+The runner creates the configured database if absent, then applies numbered SQL
+migrations in order. Each migration and its checksum record commit together;
+failure rolls back that migration and stops execution. Rerunning skips matching
+applied migrations and rejects changed checksums. Add a new migration to make
+further structural changes; do not edit applied SQL files.
+
+Database creation runs separately because PostgreSQL requires it outside a
+transaction. `000_create_database.sql` remains a standalone manual bootstrap;
+the runner creates the configured database directly and does not execute or
+record that helper. The first transactional migration creates the history table.
+Initialization and bronze runs share a database lock so they cannot overlap.
 
 ## Run bronze
 
@@ -62,7 +82,9 @@ The runner does not automatically load `.env` files.
   already at the destination is safe to recover; different content needs a
   filename conflict resolved before retrying.
 - A PostgreSQL session lock prevents concurrent CLI runs. Logs report filenames,
-  inserted counts, skips, and failure types. No pending CSVs is a successful no-op.
+  inserted counts, skips, safe validation explanations, and database error codes
+  (SQLSTATE). Raw database error messages are withheld to avoid exposing credentials
+  or ticket content. No pending CSVs is a successful no-op.
 
 Incoming files must be fully written before running the pipeline and remain
 unchanged during processing. Archiving uses a hard link followed by source removal,

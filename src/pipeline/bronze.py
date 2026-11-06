@@ -13,6 +13,10 @@ from pyspark.sql import DataFrame, SparkSession
 from .config import DATA_DIR, PROCESSED_DIR
 
 
+class BronzeValidationError(ValueError):
+    """Pipeline validation messages that are safe to include in logs."""
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -44,9 +48,9 @@ def read_csv_records(path: Path) -> Iterator[tuple[int, str, dict[str, str]]]:
         reader = csv.reader(source, strict=True)
         headers = next(reader, None)
         if not headers or any(not header.strip() for header in headers):
-            raise ValueError("CSV must have nonempty column names")
+            raise BronzeValidationError("CSV must have nonempty column names")
         if len(set(headers)) != len(headers):
-            raise ValueError("CSV must have unique column names")
+            raise BronzeValidationError("CSV must have unique column names")
 
         previous_line = reader.line_num
         for _ in range(previous_line):
@@ -58,7 +62,7 @@ def read_csv_records(path: Path) -> Iterator[tuple[int, str, dict[str, str]]]:
             )
             previous_line = reader.line_num
             if len(values) != len(headers):
-                raise ValueError(f"CSV record {record_number} has an unexpected field count")
+                raise BronzeValidationError(f"CSV record {record_number} has an unexpected field count")
             yield record_number, raw_record, dict(zip(headers, values))
 
 
@@ -80,7 +84,7 @@ def build_bronze_dataframe(spark: SparkSession, path: Path, file_hash: str) -> D
 def ingest_file(connection: Connection, spark: SparkSession, path: Path) -> int | None:
     """Return the committed row count, or None if the file was already ingested."""
     if connection.info.transaction_status != TransactionStatus.IDLE:
-        raise ValueError("ingest_file requires a connection without an active transaction")
+        raise BronzeValidationError("ingest_file requires a connection without an active transaction")
 
     file_hash = file_sha256(path)
     with connection.transaction():
@@ -115,7 +119,7 @@ def ingest_file(connection: Connection, spark: SparkSession, path: Path) -> int 
                     row_count += 1
 
             if file_sha256(path) != file_hash:
-                raise ValueError("Source file changed during ingestion; transaction rolled back")
+                raise BronzeValidationError("Source file changed during ingestion; transaction rolled back")
 
             cursor.execute(
                 "UPDATE bronze.ingested_files SET row_count = %s WHERE file_sha256 = %s",
@@ -128,12 +132,12 @@ def ingest_file(connection: Connection, spark: SparkSession, path: Path) -> int 
 def process_file(connection: Connection, spark: SparkSession, path: Path) -> int | None:
     """Ingest and archive a pending file; return the inserted count or None if skipped."""
     if path.is_symlink() or not path.is_file() or path.resolve().parent != DATA_DIR.resolve():
-        raise ValueError("Input must be a regular file directly inside data/")
+        raise BronzeValidationError("Input must be a regular file directly inside data/")
 
     file_hash = file_sha256(path)
     row_count = ingest_file(connection, spark, path)
     if file_sha256(path) != file_hash:
-        raise ValueError("Source file changed; left in data/ for retry")
+        raise BronzeValidationError("Source file changed; left in data/ for retry")
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     destination = PROCESSED_DIR / path.name

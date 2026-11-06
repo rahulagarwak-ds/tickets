@@ -1,3 +1,4 @@
+import csv
 import logging
 import os
 import sys
@@ -5,7 +6,7 @@ import sys
 import psycopg
 from pyspark.sql import SparkSession
 
-from .pipeline.bronze import process_file
+from .pipeline.bronze import BronzeValidationError, process_file
 from .pipeline.config import DATA_DIR, DATABASE_CONFIG
 
 
@@ -53,9 +54,12 @@ def main() -> int:
         return 0
     except Exception as error:
         logger.error(
-            "Bronze run failed file=%s error_type=%s",
+            "Bronze run failed file=%s error_type=%s reason=%s sqlstate=%s",
             current_file.name if current_file else "<startup>",
             type(error).__name__,
+            str(error) if isinstance(error, (BronzeValidationError, csv.Error, OSError))
+            else "Error details withheld to avoid exposing credentials or ticket content",
+            getattr(error, "sqlstate", None),
         )
         return 1
 
