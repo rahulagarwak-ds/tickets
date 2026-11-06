@@ -1,0 +1,14 @@
+[project]
+name = "ticket-medallion"
+version = "0.1.0"
+description = "Local support-ticket medallion pipeline and agent workflows"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pyspark>=4.3,<4.4",
+    "psycopg[binary]>=3.3,<3.4",
+    "langgraph>=1.2,<2",
+    "langchain>=1.4,<2",
+    "langchain-openai>=1.7,<2",
+]
+
+
