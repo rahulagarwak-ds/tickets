@@ -1,256 +1,199 @@
-# Ticket medallion
+# Ticket reports
 
-The local pipeline uses PySpark and PostgreSQL to turn facilities-support tickets
-into reports on workload by building and recorded cost by maintenance category.
-The [Data Quality and Gold Design agents](src/agents/README.md) generate reviewable
-pipeline components with human approval, evaluations, and recorded live examples.
+This project converts facilities-support tickets into clean data and reports.
+PySpark processes the files. PostgreSQL stores the results. Two AI agents help
+write code for human review. Normal pipeline runs do not call an AI model.
 
-PostgreSQL schemas separate raw evidence (`bronze`), validated tickets (`silver`),
-and reporting models (`gold`). Keeping them in one local database makes it possible
-to follow a reported ticket back to its source row with a SQL join.
+## 1. How to run
 
-## Prerequisites
+Install **uv**, **Java 17 or 21**, and **PostgreSQL**. Start PostgreSQL before you
+run the project. Your database account must have permission to create databases.
+uv manages the Python packages; Java and PostgreSQL are separate installations.
 
-- uv; Python 3.12 is selected through `.python-version` and `pyproject.toml`.
-- Java 17 or 21 on `PATH`, or a valid `JAVA_HOME`.
-- A running PostgreSQL server. Initial setup requires a user with permission to
-  create the project database and schemas, and access to the `postgres` maintenance database.
+Open a terminal in the repository folder, which contains `pyproject.toml`.
+The project uses Python 3.12 and the package versions in `uv.lock`.
 
-## Run from a fresh clone
+The default database settings are:
 
-From the repository root, with PostgreSQL running, use this command to install
-locked dependencies, initialize the database, and process the included CSV.
+| Setting | Default | Terminal variable to change it |
+| --- | --- | --- |
+| Server address | `::1` (this computer) | `PGHOST` |
+| Port | `5432` | `PGPORT` |
+| Database name | `ticket_medallion` | `PGDATABASE` |
+| Database user | Your operating-system username | `PGUSER` |
+| Password | Not set by the project | `PGPASSWORD` |
+
+For example, use `export PGUSER="your_database_user"` to select another account.
+Then run this single command:
 
 ```bash
 uv sync --locked && uv run --locked python -m src.migrations.runner && uv run --locked python -m src.cli
 ```
 
-The default connection is `::1:5432`, database `ticket_medallion`, with the
-operating-system username. Set `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, or
-`PGPASSWORD` in the shell before running the command if your setup differs.
-Keep credentials outside Git. The CLI reads the environment directly.
+It installs Python packages, creates the database and tables, and processes the
+included CSV file. The sample produces 10,254 accepted tickets and 26 rejected IDs.
 
-## Dependencies
-
-| Dependency | Purpose |
-| --- | --- |
-| Python 3.12 (tested: 3.12.7) | Project runtime |
-| PySpark 4.3.0 | Typed bronze records, silver transformations and deduplication |
-| psycopg 3.3.8 with binary extras | Transactional PostgreSQL ingestion; no local compilation |
-| LangGraph 1.2.20 | Agent workflows |
-| LangChain 1.4.9 | LLM integration |
-| langchain-openai 1.7.4 | OpenAI Responses adapter for the `gpt-6-luna` agents |
-
-Exact Python library versions are recorded in `uv.lock`. Java and PostgreSQL
-are managed separately from uv. The current pipeline does not require JDBC.
-
-## Database initialization
-
-The runner creates the configured database if absent, then applies numbered SQL
-migrations in order. Each migration and its checksum record commit together;
-failure rolls back that migration and stops execution. Rerunning skips matching
-applied migrations and rejects changed checksums. Add a new migration to make
-further structural changes; do not edit applied SQL files.
-
-Database creation runs separately because PostgreSQL requires it outside a
-transaction. `000_create_database.sql` remains a standalone manual bootstrap;
-the runner creates the configured database directly and does not execute or
-record that helper. The first transactional migration creates the history table.
-Initialization and pipeline runs share a database lock so they cannot overlap.
-
-## Run bronze → silver → gold
-
-Place incoming CSV files directly inside `data/`, then run from the repository root:
+For later runs, put complete CSV files directly in `data/`, then run:
 
 ```bash
 uv run --locked python -m src.cli
 ```
 
-The command ingests and archives pending CSVs, then rebuilds `silver.tickets` and
-`silver.rejected_tickets` from all bronze records. Gold then publishes one fact
-per accepted ticket. With an empty inbox, the same command rebuilds silver and
-gold from existing data. One Spark session and database connection serve the run.
+Successful files move to `data/processed/` without changing their contents.
+Keep both folders on the same storage volume. The sample file remains in Git;
+do not commit its local deletion after processing.
 
-## File lifecycle and retries
-
-- CSV files directly in `data/` are pending, active, or interrupted inputs.
-  Subdirectories are not scanned, and files run in filename order.
-- Each file's SHA-256 identifies its content, regardless of filename.
-  A committed file hash is skipped on subsequent arrivals.
-- New file metadata and all its records commit in one transaction.
-  `bronze.ingested_files` stores the original filename, file SHA-256, row count,
-  and `ingested_at`. Each row in `bronze.raw_tickets` links to that file by hash
-  and carries a record number, original CSV record text, parsed string fields
-  in JSONB, and a row hash. Keeping the fields as strings defers business types
-  to silver (schema-on-read). Repeated source rows retain separate record numbers.
-- Only after ingestion succeeds does the file move into `data/processed/`.
-  A different file at the destination is never overwritten.
-- Failed ingestion rolls back that file and leaves it pending. Earlier files
-  remain committed, and the run stops with a nonzero exit status.
-- If archiving fails after commit, retry the same command. The committed hash
-  prevents duplicate ingestion while archiving is retried. An identical file
-  already at the destination is safe to recover; different content needs a
-  filename conflict resolved before retrying.
-- A PostgreSQL session lock prevents concurrent CLI runs. Logs report filenames,
-  inserted counts, skips, safe validation explanations, and database error codes
-  (SQLSTATE). Raw database error messages are withheld to avoid exposing credentials
-  or ticket content.
-
-Incoming files must be fully written before running the pipeline and remain
-unchanged during processing. Archiving uses a hard link followed by source removal,
-so `data/` and `data/processed/` must be on the same filesystem. Local DataFrame
-construction holds records in driver memory; larger inputs need distributed reads.
-
-The sample CSV remains version-controlled at `data/raw_tickets.csv`. Processing
-moves its local copy into the ignored `data/processed/` directory, so Git reports
-the original path as deleted afterward. Do not commit that deletion if retaining
-the sample for fresh clones.
-
-## Silver rules
-
-Bronze remains unchanged. Silver retains a reference to each source record and
-stores quality flags; ordinary field problems do not discard the whole ticket.
-
-| Column | Cleaning and interpretation |
-| --- | --- |
-| `ticket_id` | Require `TKT-` followed by digits. Missing (`empty`, `N/A`, `NULL`) or malformed IDs go to `silver.rejected_tickets`. Never invent identifiers. |
-| `created_at` | Parse observed formats and month-first numeric dates. Missing/invalid values become null with flags; retain date/minute/second precision. |
-| `resolved_at` | Same parsing rules. Missing is allowed for unresolved tickets; flag missing terminal dates, invalid values, and status/date inconsistencies without changing status. |
-| `category` | Use fixed aliases in `CATEGORY_ALIASES` in `src/pipeline/silver.py`. Repair recognized category/description swaps and flag them; unknown/junk labels become null. Explicit Other/Misc remains `other`. |
-| `priority` | Normalize low/lo, medium/med/Normal, high/hi, and critical/crit. Missing and ambiguous ASAP/urgent values become null with distinct flags; no default priority. |
-| `status` | Normalize six statuses: open, in_progress, pending_vendor, escalated, resolved, closed. Keep resolved/closed distinct; unknown status becomes null. Never infer it from notes. |
-| `building` | Preserve names; missing tokens become null. Retain and flag test building; do not invent a location hierarchy. |
-| `description` | Apply approved swaps, preserve prose and Unicode, null empty/NULL, and flag suspected junk without following its instructions. No text-based ticket deduplication. |
-| `submitted_by` | Trim and proper-case only; never merge initials, nicknames, or identities. Flag missing/test values and retain account labels. |
-| `assigned_to` | Preserve company spelling and Joe (in-house); capitalize generic team/role labels. Missing becomes null and flagged; do not infer assignments. |
-| `resolution_notes` | Null empty notes; preserve short notes, case, and wording. Progress notes on unresolved tickets are allowed; no automatic extraction or status changes. |
-| `cost` | Remove the observed dollar prefix and parse exact decimals. Missing tokens become null/missing; errors, negatives (including -1/-999), non-finite or unrepresentable values become null/invalid. Preserve zero and high costs; do not assume or convert currency. |
-| `sla_hours` | Parse nonnegative integers. Missing tokens become null/missing; negatives and invalid integers become null/invalid. Preserve 0/999 with a requires-confirmation flag; exclude them from default SLA metrics. Never infer SLA from priority. |
-
-The source profile informed these choices. All 10,254 well-formed IDs were
-distinct, so fabricating IDs for the other 26 rows would obscure which tickets
-actually exist. Unambiguous numeric dates supported month-first parsing. Time
-was absent from 1,956 creation dates, which makes hourly duration unreliable.
-In 49 rows the category contained descriptive text and the description was a
-known category label, giving a specific condition for a repair.
-
-Of 195 negative costs, 192 were `-1` and three were `-999`. Their meaning is
-undocumented, so silver flags them and excludes them from recorded spending.
-The 484 zero-hour and 557 999-hour SLA values also lack a documented business
-meaning. Silver retains both values for review.
-
-Timestamps use PostgreSQL `timestamp without time zone` and Spark `TIMESTAMP_NTZ`
-to preserve source clock readings. Each has separate precision and timezone fields:
-Unix seconds produce UTC clock readings labelled `UTC`; other source timezones
-remain null/unknown. Date-only values use midnight with precision `date`, not an
-invented observation time. Hourly metrics require sufficient precision and a
-known, compatible timezone; unknown-zone values are not silently treated as UTC.
-
-Identical source payloads deduplicate by ticket ID, choosing the lowest file hash
-and record number as deterministic lineage. Different source payloads sharing a
-valid ID stop publication until an update policy is approved; arrival order does
-not establish a newer ticket state.
-
-Both silver tables are staged and replaced in one transaction. A failed silver
-refresh preserves the previous published silver tables; completed bronze ingestions
-and archived source files remain intact. Rerun the command after resolving the
-failure; silver rebuilds from bronze without needing the incoming files restored.
-
-## Gold models
+## 2. Architecture and layer separation
 
 ```mermaid
-flowchart LR
-    CSV["data/*.csv"] --> B["bronze.raw_tickets"]
-    B --> S["silver.tickets"]
-    B --> R["silver.rejected_tickets"]
-    S --> F["gold.fact_ticket"]
-    S --> D["Building, category, priority, status and date dimensions"]
-    D --> F
-    F --> K["gold.ticket_kpis"]
-    K --> O["gold.building_operations"]
-    K --> C["gold.category_performance"]
+flowchart TD
+    CSV["CSV files in data/"] --> B["Bronze: original records"]
+    B --> S["Silver: clean tickets and rejected IDs"]
+    S --> F["Gold: ticket table and shared lookup tables"]
+    F --> K["Shared ticket measures"]
+    K --> O["Building workload report"]
+    K --> C["Work-category report"]
+    B --> DQ["Data Quality agent"]
+    S --> GD["Gold Design agent"]
+    DQ --> R["Human review, approval and tests"]
+    GD --> R
+    R --> I["Human adds accepted code to the pipeline"]
 ```
 
-`gold.fact_ticket` stores the current status and cost through a status key and a
-nullable recorded amount, plus the ticket ID and bronze lineage. It joins to
-`dim_building`, `dim_category`, `dim_priority`, and `dim_status` by stable keys.
-Each has an Unknown member (key 0). Created and resolved dates both reference
-`dim_date`, using the calendar day of the silver clock reading.
+A PostgreSQL **schema** is a named group of tables. One database contains three schemas:
 
-Each gold refresh inserts new buildings and dates and replaces the fact rows
-in one transaction. A failure rolls back that publication. Confirmed dimension
-corrections use Type 1 updates in place, preserving the key. A building rename
-also requires the corresponding silver mapping so future loads reuse that key.
+| Schema | Stored data | Reason for separation |
+| --- | --- | --- |
+| `bronze` | Original CSV record text, parsed text fields, source filename, load time and hashes | Preserve evidence and trace results to their source. |
+| `silver` | Clean, typed tickets, issue flags and rejected IDs | Apply business rules without changing the original records. |
+| `gold` | Ticket measures and reporting views | Give reports a shared set of definitions. |
 
-| Reporting view | Grain and purpose |
-| --- | --- |
-| `gold.ticket_kpis` | One row per accepted ticket. Supplies shared indicators and supports drill-down to individual tickets. |
-| `gold.building_operations` | One row per building. Shows where unresolved and critical work is concentrated. |
-| `gold.category_performance` | One row per maintenance category. Shows which kinds of work account for demand and recorded cost. |
+Bronze keeps field values as text. Silver assigns types when it reads them.
+This is **schema-on-read**: interpret the source after saving it.
 
-Both summaries group the same ticket indicators, including Unknown groups.
+A **hash** is a fingerprint calculated from data. File hashes prevent repeat
+loads, even when a file is renamed. Row hashes track matching source records.
+Failed loads roll back their database changes. A failed silver or gold stage
+preserves that stage's previous results. Logs show stage outcomes and row counts.
 
-| KPI | Calculation within each group |
-| --- | --- |
-| Total, terminal, unresolved, unknown status | Count all tickets. Count resolved/closed as terminal, open/in progress/pending vendor/escalated as unresolved, and unknown status separately. The three counts sum to the total. |
-| Critical unresolved | Count unresolved tickets whose priority is critical. |
-| Terminal rate (%) | 100 × terminal tickets / tickets with known status. A zero denominator yields null. |
-| Tickets with recorded cost, cost coverage (%) | Count non-null costs, including zero. Coverage is 100 × that count / total tickets. |
-| Total and average recorded cost | Sum the recorded amounts. Divide that sum by tickets with recorded cost for the average. Both return null for groups with no recorded amounts. |
+## 3. Silver cleaning rules
 
-Cost figures use source units. Each report describes the current ticket snapshot.
+Missing or invalid fields use SQL `NULL`, which means no value.
+Issue flags explain the reason. Most field errors do not reject the whole ticket.
+SLA means service level agreement. The source SLA hours need business confirmation.
 
-## At 100× scale
+| Field | Rule | Reason |
+| --- | --- | --- |
+| `ticket_id` | Require `TKT-` followed by digits. Send other IDs to the rejected table. | Do not invent ticket identities. |
+| `created_at`, `resolved_at` | Parse observed formats; use month-first numeric dates. Keep date/time precision and timezone information. Flag invalid dates and status/date conflicts. | Avoid false event times. |
+| `category` | Map known spellings. Repair recognized category/description swaps. Leave unrecognized categories empty. | Make categories consistent without guessing. |
+| `priority` | Map known spellings to low, medium, high or critical. Leave ambiguous values empty. | Do not invent urgency. |
+| `status` | Map known spellings to open, in_progress, pending_vendor, escalated, resolved or closed. Leave unknown values empty. | Keep reporting groups consistent. |
+| `building` | Keep names; mark missing and test values. | Do not invent locations. |
+| `description` | Keep wording and characters. Apply approved swaps and flag suspected junk. | Preserve the ticket's meaning. |
+| `submitted_by` | Trim spaces and apply proper case. Flag missing values. Never merge identities. | Similar names can identify different people. |
+| `assigned_to` | Keep company spelling. Standardize generic team labels; flag missing values. | Preserve assignment identity. |
+| `resolution_notes` | Keep wording and case. Remove empty placeholders. | Notes do not prove a ticket is complete. |
+| `cost` | Parse exact decimals and remove the observed dollar prefix. Keep zero. Flag missing, negative or invalid values separately. | Missing cost must not count as zero spending. |
+| `sla_hours` | Parse whole, nonnegative hours. Keep 0 and 999, but flag them for confirmation. | These target-time values have no confirmed business meaning. |
 
-At roughly one million rows with daily arrivals, the first bottlenecks would be
-collecting bronze in Python driver memory and rebuilding all silver and gold rows
-on every run. The proposed changes for that workload are:
+The source supports month-first dates and contains 49 category/description swaps.
+Negative costs include `-1` and `-999`; their meaning is undocumented.
+Text dates have no confirmed timezone. Hourly duration measures are therefore excluded.
 
-- **Read and load in partitions.** Keep file hashes and record-level lineage.
-  Stream or partition incoming batches and bulk-load their records within bounded
-  transactions. Publish a batch as complete only after all its rows reconcile.
-- **Process changed ticket IDs.** Use committed batch IDs to select new work so
-  late arrivals are picked up regardless of creation date. Compare those IDs
-  with existing versions, preserve the conflict policy, and checkpoint after a
-  successful publish. Backfills can replay a chosen set of batches.
-- **Refresh affected gold facts.** Update facts by ticket ID and reuse dimension
-  keys. At 10M rows, measure the two reporting queries before materializing them.
-  If summaries are stored, recompute both old and new groups when a ticket moves.
-  Recalculate rates from counts so partial refreshes preserve their denominators.
+Exact duplicate tickets collapse to one record. Different data for the same valid
+ticket ID stops publication: the source gives no reliable update order.
 
-## Verified behavior
+## 4. Gold models and their purpose
 
-On 7 November 2026, the supplied CSV was ingested on macOS ARM64 with Java
-17.0.16 and PostgreSQL 14.17. All 10,280 database records matched source text,
-parsed fields, and hashes; the archived file was byte-identical. A rerun added
-no records. Temporary checks also covered duplicate arrivals, transaction rollback,
-archive recovery, and CLI failure handling; no permanent test suite is included.
-Silver validation used a disposable database with all 10,280 source records:
-10,254 accepted tickets and 26 rejected IDs. Checks covered deterministic reruns,
-duplicate/conflicting payloads, real database locking, and rollback of both tables
-on a forced publication failure.
-The combined CLI was also validated in a disposable database: first-run ingestion,
-silver refresh with no new files, restoration of a missing silver row on rerun,
-and preservation of published silver when a new bronze batch introduced a conflict.
+`gold.fact_ticket` stores one row per accepted ticket. Shared lookup tables
+(**dimensions**) describe buildings, categories, priorities, statuses and dates.
+Missing lookup values use an Unknown entry, so reports keep those tickets.
 
-The combined command was then run against the project database on 7 November 2026:
-10,254 cleaned tickets and 26 rejected IDs (22 missing, 4 malformed). Every published
-field and bronze reference was verified, including 49 category/description repairs
-and one category recovery. A second run produced identical silver rows, flags,
-lineage, and rejections while preserving bronze metadata and the archived CSV.
+The three reporting models are database **views**: saved queries over these tables.
 
-Gold contained 10,254 facts on 7 November 2026. All KPIs matched independent
-aggregations of silver for each of the 19 building groups and 12 category groups.
-The 6,452 tickets with recorded costs totaled 38,365,957.76 source units
-(62.92% cost coverage).
+| Model | Each row describes | Business purpose |
+| --- | --- | --- |
+| `gold.ticket_kpis` | One ticket and its calculated measures | Define measures once for both reports. KPI means key performance indicator. |
+| `gold.building_operations` | One building | Identify buildings with unresolved or critical work. |
+| `gold.category_performance` | One maintenance category | Compare demand and recorded spending by type of work. |
 
-A fresh checkout of commit `181af3b` passed locked installation, database
-initialization, and a complete run against a disposable PostgreSQL database.
-Delivering the identical CSV under a second filename left every bronze, silver,
-gold, and migration table and reporting view identical to the first run.
+Resolved and closed tickets count as complete. Other known statuses count as
+unresolved. Unknown statuses remain separate. Critical unresolved tickets have
+both a critical priority and an unresolved status.
 
-Both Luna agent candidates passed isolated fixtures and full-dataset comparisons.
-The Gold candidate materialized all 19 building groups from 10,254 silver tickets
-in a disposable database and matched every published report KPI. Exact inputs,
-outputs, approvals, review history and results are linked in the
-[agent assessment](src/agents/README.md#live-examples-and-honest-assessment).
+Completion rate is completed tickets divided by tickets with known status.
+Cost coverage is tickets with recorded cost divided by all tickets.
+Both rates are percentages. Cost totals and averages include recorded zero costs
+and exclude missing costs. Groups without recorded costs have no total or average.
+The source currency is unknown; no currency conversion is applied.
+
+## 5. Agent assessment and use
+
+LangGraph controls the agent workflow. LangChain connects it to OpenAI's
+`gpt-6-luna` model. Each agent receives data summaries, table definitions,
+approved rules and the user's request. Generated code requires human review.
+
+### Data Quality agent
+
+- **Input:** A bronze data summary and cleaning rules. Example request: “Generate cost and SLA cleaning.”
+- **Output:** A PySpark cleaning function. For example, `$12.50` becomes `12.50`; `-999` becomes `NULL` with a `cost_invalid` flag.
+- **Assessment:** Five drafts were needed to correct number parsing. Review and corrections cost more effort than writing this small component directly. No time saving was demonstrated.
+
+See the recorded [input](src/agents/examples/live/data_quality/context.json)
+and [generated code](src/agents/examples/live/data_quality/candidate.py).
+The accepted version passed fixed test cases and matched the approved cost/SLA
+rules for all 10,280 source rows.
+
+### Gold Design agent
+
+- **Input:** The silver table definition and ticket domain. Example request: “Generate a building workload report with cost coverage.”
+- **Output:** SQL for a building report stored as a **materialized view**. Unlike a regular view, it saves results and needs a refresh after data changes.
+- **Assessment:** The latest version needed one correction for status names. It provided a useful SQL draft, but no time saving was demonstrated.
+
+See the recorded [input](src/agents/examples/live/gold_design_materialized/context.json)
+and [generated SQL](src/agents/examples/live/gold_design_materialized/candidate.sql).
+The approved SQL created a materialized view in a temporary database.
+Every report value matched the existing gold report: 19 groups and 10,254 tickets.
+Trust the output after checking its grouping, status values and calculations.
+Override invented business meanings or rules that conflict with approved definitions.
+
+### Generate, review and test
+
+Set the API key in your terminal. The program does not load `.env` automatically.
+Keep the key outside Git. Run either agent command:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+uv run --locked python -m src.agents.cli propose data_quality --instruction "Generate cost and SLA cleaning"
+uv run --locked python -m src.agents.cli propose gold_design --instruction "Generate a building workload report with cost coverage"
+```
+
+Each command prints a folder under `data/processed/agent_runs/`.
+Read its inputs, proposed rules, code and execution description (`manifest.json`).
+The folder also records model usage and run details.
+After review, replace `RUN` with that folder's path:
+
+```bash
+uv run --locked python -m src.agents.cli approve RUN --reviewer "Your name"
+uv run --locked python -m src.agents.cli evaluate RUN
+```
+
+Approval records a fingerprint of the reviewed files. Changes invalidate approval.
+Tests run separately from the working pipeline. Code checks do not prevent all
+access to local files; review is required. Add accepted code through a separate
+reviewed Git change. The agents do not replace pipeline code automatically.
+
+## 6. Changes at 100× scale
+
+For one million or more rows with daily arrivals:
+
+1. Read and load data in batches instead of holding all records in Python memory.
+2. Track completed batches and process only changed ticket IDs. Include late files;
+   do not use ticket creation dates alone to select new work.
+3. Update affected gold tickets and report groups. Calculate rates from counts,
+   so results remain correct when groups change.
+4. At ten million rows, compute data summaries in PostgreSQL or Spark.
+   Send summaries and small examples to the agents, never one request per row.
+   Reuse summaries until the data or table definitions change. Reuse accepted code
+   for routine loads to limit model cost.
