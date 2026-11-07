@@ -4,12 +4,30 @@ The local pipeline uses PySpark and PostgreSQL to turn facilities-support ticket
 into reports on workload by building and recorded cost by maintenance category.
 Agent workflows are pending.
 
+PostgreSQL schemas separate raw evidence (`bronze`), validated tickets (`silver`),
+and reporting models (`gold`). Keeping them in one local database makes it possible
+to follow a reported ticket back to its source row with a SQL join.
+
 ## Prerequisites
 
 - uv; Python 3.12 is selected through `.python-version` and `pyproject.toml`.
 - Java 17 or 21 on `PATH`, or a valid `JAVA_HOME`.
 - A running PostgreSQL server. Initial setup requires a user with permission to
   create the project database and schemas, and access to the `postgres` maintenance database.
+
+## Run from a fresh clone
+
+From the repository root, with PostgreSQL running, use this command to install
+locked dependencies, initialize the database, and process the included CSV.
+
+```bash
+uv sync --locked && uv run --locked python -m src.migrations.runner && uv run --locked python -m src.cli
+```
+
+The default connection is `::1:5432`, database `ticket_medallion`, with the
+operating-system username. Set `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, or
+`PGPASSWORD` in the shell before running the command if your setup differs.
+Keep credentials outside Git. The CLI reads the environment directly.
 
 ## Dependencies
 
@@ -25,19 +43,7 @@ Agent workflows are pending.
 Exact Python library versions are recorded in `uv.lock`. Java and PostgreSQL
 are managed separately from uv. The current pipeline does not require JDBC.
 
-Install the Python dependencies:
-
-```bash
-uv sync --locked
-```
-
-## Initialize the database
-
-Run from the repository root:
-
-```bash
-uv run --locked python -m src.migrations.runner
-```
+## Database initialization
 
 The runner creates the configured database if absent, then applies numbered SQL
 migrations in order. Each migration and its checksum record commit together;
@@ -64,20 +70,18 @@ The command ingests and archives pending CSVs, then rebuilds `silver.tickets` an
 per accepted ticket. With an empty inbox, the same command rebuilds silver and
 gold from existing data. One Spark session and database connection serve the run.
 
-The default connection is host `::1`, port `5432`, database `ticket_medallion`,
-and the operating-system username. Override it using `PGHOST`, `PGPORT`,
-`PGDATABASE`, `PGUSER`, and `PGPASSWORD`. Keep credentials outside Git.
-The runner does not automatically load `.env` files.
-
 ## File lifecycle and retries
 
 - CSV files directly in `data/` are pending, active, or interrupted inputs.
   Subdirectories are not scanned, and files run in filename order.
 - Each file's SHA-256 identifies its content, regardless of filename.
   A committed file hash is skipped on subsequent arrivals.
-- New file metadata and all its records commit in one transaction. Raw CSV
-  record text and string-valued parsed fields are retained. Row hashes identify
-  duplicate content; duplicate rows are preserved in bronze.
+- New file metadata and all its records commit in one transaction.
+  `bronze.ingested_files` stores the original filename, file SHA-256, row count,
+  and `ingested_at`. Each row in `bronze.raw_tickets` links to that file by hash
+  and carries a record number, original CSV record text, parsed string fields
+  in JSONB, and a row hash. Keeping the fields as strings defers business types
+  to silver (schema-on-read). Repeated source rows retain separate record numbers.
 - Only after ingestion succeeds does the file move into `data/processed/`.
   A different file at the destination is never overwritten.
 - Failed ingestion rolls back that file and leaves it pending. Earlier files
@@ -121,6 +125,18 @@ stores quality flags; ordinary field problems do not discard the whole ticket.
 | `resolution_notes` | Null empty notes; preserve short notes, case, and wording. Progress notes on unresolved tickets are allowed; no automatic extraction or status changes. |
 | `cost` | Remove the observed dollar prefix and parse exact decimals. Missing tokens become null/missing; errors, negatives (including -1/-999), non-finite or unrepresentable values become null/invalid. Preserve zero and high costs; do not assume or convert currency. |
 | `sla_hours` | Parse nonnegative integers. Missing tokens become null/missing; negatives and invalid integers become null/invalid. Preserve 0/999 with a requires-confirmation flag; exclude them from default SLA metrics. Never infer SLA from priority. |
+
+The source profile informed these choices. All 10,254 well-formed IDs were
+distinct, so fabricating IDs for the other 26 rows would obscure which tickets
+actually exist. Unambiguous numeric dates supported month-first parsing. Time
+was absent from 1,956 creation dates, which makes hourly duration unreliable.
+In 49 rows the category contained descriptive text and the description was a
+known category label, giving a specific condition for a repair.
+
+Of 195 negative costs, 192 were `-1` and three were `-999`. Their meaning is
+undocumented, so silver flags them and excludes them from recorded spending.
+The 484 zero-hour and 557 999-hour SLA values also lack a documented business
+meaning. Silver retains both values for review.
 
 Timestamps use PostgreSQL `timestamp without time zone` and Spark `TIMESTAMP_NTZ`
 to preserve source clock readings. Each has separate precision and timezone fields:
@@ -183,6 +199,24 @@ Both summaries group the same ticket indicators, including Unknown groups.
 
 Cost figures use source units. Each report describes the current ticket snapshot.
 
+## At 100× scale
+
+At roughly one million rows with daily arrivals, the first bottlenecks would be
+collecting bronze in Python driver memory and rebuilding all silver and gold rows
+on every run. The proposed changes for that workload are:
+
+- **Read and load in partitions.** Keep file hashes and record-level lineage.
+  Stream or partition incoming batches and bulk-load their records within bounded
+  transactions. Publish a batch as complete only after all its rows reconcile.
+- **Process changed ticket IDs.** Use committed batch IDs to select new work so
+  late arrivals are picked up regardless of creation date. Compare those IDs
+  with existing versions, preserve the conflict policy, and checkpoint after a
+  successful publish. Backfills can replay a chosen set of batches.
+- **Refresh affected gold facts.** Update facts by ticket ID and reuse dimension
+  keys. At 10M rows, measure the two reporting queries before materializing them.
+  If summaries are stored, recompute both old and new groups when a ticket moves.
+  Recalculate rates from counts so partial refreshes preserve their denominators.
+
 ## Verified behavior
 
 On 7 November 2026, the supplied CSV was ingested on macOS ARM64 with Java
@@ -208,3 +242,8 @@ Gold contained 10,254 facts on 7 November 2026. All KPIs matched independent
 aggregations of silver for each of the 19 building groups and 12 category groups.
 The 6,452 tickets with recorded costs totaled 38,365,957.76 source units
 (62.92% cost coverage).
+
+A fresh checkout of commit `181af3b` passed locked installation, database
+initialization, and a complete run against a disposable PostgreSQL database.
+Delivering the identical CSV under a second filename left every bronze, silver,
+gold, and migration table and reporting view identical to the first run.
