@@ -1,0 +1,44 @@
+[
+  {
+    "run_id": "1ea01385dbd548d8b0a7190c7a092a28",
+    "feedback": "",
+    "instruction": "Design the approved building operations view from silver.tickets. Include workload, critical unresolved tickets, unknown groups, recorded cost coverage, and the correct known-status terminal-rate denominator. Explain grain and trust/override conditions.",
+    "summary": "Candidate building-operations view sourced directly from silver.tickets. It reports workload, status groups, critical unresolved tickets, and recorded-cost coverage without hourly SLA metrics.",
+    "code": "CREATE VIEW candidate.report AS SELECT COALESCE(building, 'Unknown') AS building, COUNT(*) AS total_tickets, COUNT(*) FILTER (WHERE LOWER(BTRIM(status)) IN ('resolved', 'closed')) AS terminal_tickets, COUNT(*) FILTER (WHERE LOWER(BTRIM(status)) IN ('open', 'in progress', 'pending vendor', 'escalated')) AS unresolved_tickets, COUNT(*) FILTER (WHERE status IS NULL OR LOWER(BTRIM(status)) IN ('', 'null', 'unknown', '???') OR LOWER(BTRIM(status)) NOT IN ('open', 'in progress', 'pending vendor', 'escalated', 'resolved', 'closed')) AS unknown_status_tickets, COUNT(*) FILTER (WHERE LOWER(BTRIM(priority)) = 'critical' AND LOWER(BTRIM(status)) IN ('open', 'in progress', 'pending vendor', 'escalated')) AS critical_unresolved_tickets, COUNT(*) FILTER (WHERE cost >= 0) AS tickets_with_recorded_cost, SUM(cost) FILTER (WHERE cost >= 0) AS total_recorded_cost, AVG(cost) FILTER (WHERE cost >= 0) AS average_recorded_cost, 100.0 * COUNT(*) FILTER (WHERE cost >= 0) / NULLIF(COUNT(*), 0) AS cost_coverage_pct, 100.0 * COUNT(*) FILTER (WHERE LOWER(BTRIM(status)) IN ('resolved', 'closed')) / NULLIF(COUNT(*) FILTER (WHERE LOWER(BTRIM(status)) IN ('open', 'in progress', 'pending vendor', 'escalated', 'resolved', 'closed')), 0) AS terminal_rate_pct FROM silver.tickets GROUP BY COALESCE(building, 'Unknown')",
+    "usage": {
+      "input_tokens": 4729,
+      "output_tokens": 1616,
+      "total_tokens": 6345,
+      "input_token_details": {
+        "cache_creation": 4726,
+        "cache_read": 0
+      },
+      "output_token_details": {
+        "reasoning": 264
+      }
+    },
+    "elapsed_seconds": 18.868,
+    "source": "openai"
+  },
+  {
+    "run_id": "874bf45428194e0ba1f7d64c0d8c588c",
+    "feedback": "The first draft confuses raw bronze labels with cleaned silver status codes. Silver stores exactly open, in_progress, pending_vendor, escalated, resolved, closed, or SQL NULL. Use these canonical values: in_progress and pending_vendor must count as unresolved, as critical-unresolved when appropriate, and in the terminal-rate denominator. Schema cleaning already ensures nonnegative cost or null. Use recorded cost directly and COUNT(cost). Keep Unknown building group and nullable sums/averages and known-status denominator. Format SQL across lines for human review. Do not claim testing has run.",
+    "instruction": "Generate the approved building-operations view against cleaned silver.tickets",
+    "summary": "Candidate building-operations view sourced from cleaned silver.tickets. It reports ticket volume, canonical status groups, critical unresolved work, and recorded-cost metrics; it does not include hourly SLA metrics.",
+    "code": "CREATE VIEW candidate.report AS\nSELECT\n    COALESCE(building, 'Unknown') AS building,\n    COUNT(*) AS total_tickets,\n    COUNT(*) FILTER (WHERE status IN ('resolved', 'closed')) AS terminal_tickets,\n    COUNT(*) FILTER (WHERE status IN ('open', 'in_progress', 'pending_vendor', 'escalated')) AS unresolved_tickets,\n    COUNT(*) FILTER (WHERE status IS NULL) AS unknown_status_tickets,\n    COUNT(*) FILTER (\n        WHERE LOWER(BTRIM(priority)) = 'critical'\n          AND status IN ('open', 'in_progress', 'pending_vendor', 'escalated')\n    ) AS critical_unresolved_tickets,\n    COUNT(cost) AS tickets_with_recorded_cost,\n    SUM(cost) AS total_recorded_cost,\n    AVG(cost) AS average_recorded_cost,\n    100.0 * COUNT(cost) / NULLIF(COUNT(*), 0) AS cost_coverage_pct,\n    100.0 * COUNT(*) FILTER (WHERE status IN ('resolved', 'closed'))\n        / NULLIF(COUNT(*) FILTER (\n            WHERE status IN ('open', 'in_progress', 'pending_vendor', 'escalated', 'resolved', 'closed')\n        ), 0) AS terminal_rate_pct\nFROM silver.tickets\nGROUP BY COALESCE(building, 'Unknown')",
+    "usage": {
+      "input_tokens": 6119,
+      "output_tokens": 1462,
+      "total_tokens": 7581,
+      "input_token_details": {
+        "cache_creation": 6116,
+        "cache_read": 0
+      },
+      "output_token_details": {
+        "reasoning": 87
+      }
+    },
+    "elapsed_seconds": 14.133,
+    "source": "openai"
+  }
+]

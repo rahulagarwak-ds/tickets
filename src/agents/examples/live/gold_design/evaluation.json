@@ -1,0 +1,8 @@
+{
+  "fingerprint": "9c7fae5ef5c88cc8a8658598a61b026c41ecbc4a4092946f81b221739afe37fa",
+  "agent": "gold_design",
+  "evaluated_at": "2026-11-07T18:32:23.993902+00:00",
+  "checks": "grain, report columns, reconciliation, zero/missing cost, unknown groups, rate denominators",
+  "passed": true,
+  "elapsed_seconds": 0.116
+}

@@ -1,0 +1,22 @@
+{
+  "passed": true,
+  "rows": 10280,
+  "fingerprint": "5165a41a6234026e9043a7f52c969f1ad1e8b52ce52c7e142dcccdc708be8d43",
+  "checked_at": "2026-11-07T18:36:38.802666+00:00",
+  "cost": {
+    "missing": 3621,
+    "valid": 6452,
+    "invalid": 207
+  },
+  "sla": {
+    "valid": 6144,
+    "missing": 3086,
+    "requires_confirmation": 1041,
+    "invalid": 9
+  },
+  "checks": [
+    "all costs/SLA and flags equal approved parsers",
+    "all other source fields and lineage preserved",
+    "one output per source record"
+  ]
+}

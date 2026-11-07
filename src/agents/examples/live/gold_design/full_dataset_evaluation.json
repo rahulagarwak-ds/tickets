@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "groups": 19,
+  "tickets": 10254,
+  "fingerprint": "9c7fae5ef5c88cc8a8658598a61b026c41ecbc4a4092946f81b221739afe37fa",
+  "checked_at": "2026-11-07T18:36:39.820677+00:00",
+  "checks": [
+    "all report columns equal published gold view",
+    "every building group and KPI match",
+    "ticket and recorded-cost totals reconcile with silver"
+  ]
+}

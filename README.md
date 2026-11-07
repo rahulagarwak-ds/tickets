@@ -2,7 +2,8 @@
 
 The local pipeline uses PySpark and PostgreSQL to turn facilities-support tickets
 into reports on workload by building and recorded cost by maintenance category.
-Agent workflows are pending.
+The [Data Quality and Gold Design agents](src/agents/README.md) generate reviewable
+pipeline components with human approval, evaluations, and recorded live examples.
 
 PostgreSQL schemas separate raw evidence (`bronze`), validated tickets (`silver`),
 and reporting models (`gold`). Keeping them in one local database makes it possible

@@ -1,0 +1,8 @@
+{
+  "fingerprint": "5165a41a6234026e9043a7f52c969f1ad1e8b52ce52c7e142dcccdc708be8d43",
+  "agent": "data_quality",
+  "evaluated_at": "2026-11-07T18:32:23.994530+00:00",
+  "checks": "13 value fixtures, types, identifiers, row preservation, empty input",
+  "passed": true,
+  "elapsed_seconds": 7.457
+}

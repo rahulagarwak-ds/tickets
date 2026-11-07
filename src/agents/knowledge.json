@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "nodes": {"bronze.raw_tickets": "dataset", "silver.tickets": "dataset", "gold.fact_ticket": "fact", "gold.dim_building": "dimension", "gold.dim_category": "dimension", "gold.dim_priority": "dimension", "gold.dim_status": "dimension", "gold.dim_date": "dimension", "gold.ticket_kpis": "KPI model", "gold.building_operations": "report", "gold.category_performance": "report", "cost_rule": "approved rule"},
+  "edges": [
+    ["bronze.raw_tickets", "transforms_to", "silver.tickets"],
+    ["cost_rule", "applies_to", "silver.tickets"],
+    ["silver.tickets", "loads", "gold.fact_ticket"],
+    ["gold.fact_ticket", "references", "gold.dim_building"],
+    ["gold.fact_ticket", "references", "gold.dim_category"],
+    ["gold.fact_ticket", "references", "gold.dim_priority"],
+    ["gold.fact_ticket", "references", "gold.dim_status"],
+    ["gold.fact_ticket", "references", "gold.dim_date"],
+    ["gold.fact_ticket", "feeds", "gold.ticket_kpis"],
+    ["gold.ticket_kpis", "feeds", "gold.building_operations"],
+    ["gold.ticket_kpis", "feeds", "gold.category_performance"]
+  ]
+}

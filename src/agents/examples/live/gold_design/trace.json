@@ -1,0 +1,24 @@
+{
+  "run_id": "874bf45428194e0ba1f7d64c0d8c588c",
+  "agent": "gold_design",
+  "model": "gpt-6-luna",
+  "source": "openai",
+  "started_at": "2026-11-07T18:26:54.755683+00:00",
+  "prompt_sha256": "641b2830906ea8e9639c9d5051765e3b3022b4dc759b898257145be2bedb2991",
+  "status": "pending_human_review",
+  "usage": {
+    "input_tokens": 6119,
+    "output_tokens": 1462,
+    "total_tokens": 7581,
+    "input_token_details": {
+      "cache_creation": 6116,
+      "cache_read": 0
+    },
+    "output_token_details": {
+      "reasoning": 87
+    }
+  },
+  "response_id": "resp_0f70ec9876fc6918006aef6d6f617087d2b7eb04ae5f7f3832",
+  "fingerprint": "9c7fae5ef5c88cc8a8658598a61b026c41ecbc4a4092946f81b221739afe37fa",
+  "elapsed_seconds": 14.133
+}

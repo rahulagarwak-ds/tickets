@@ -1,0 +1,45 @@
+{
+  "summary": "Revise the cost fractional-precision check as requested: extract the entire fractional part, then check only digits after the first two for nonzero digits. Other transformation logic is unchanged. No execution or testing is claimed. Proposed overrides: none.",
+  "grain": "One output row per input row. Preserve every input column except cost, sla_hours, and quality_flags, which are normalized or added by this component.",
+  "rules": [
+    {
+      "column": "cost",
+      "observation": "The 10,280-row bronze profile reports 2,637 empty values (25.7%); top tokens also include N/A (494), TBD (484), NULL (6), and error (12). It reports 195 negative values, 295 zeros, a maximum of 14,996.24, and no IQR outliers.",
+      "recommendation": "Treat SQL null and trimmed, case-insensitive empty, NULL, N/A, and TBD as missing. Accept plain decimal notation with an optional sign and optional leading dollar sign followed by spaces. Reject nonnumeric, nonfinite, negative, unrepresentable decimal(18,2), and values with nonzero fractional digits beyond two. Preserve zero and valid high amounts without a profile-derived cap. Extract the entire fractional part before checking digits after the first two.",
+      "rationale": "Separate missing and invalid flags make data-quality issues visible downstream. The approved rule preserves zero. The observed maximum and absence of IQR outliers do not justify capping amounts. Checking only the fractional digits after position two avoids rejecting valid short fractions or trailing zeroes."
+    },
+    {
+      "column": "sla_hours",
+      "observation": "The profile reports 2,040 empty values (19.8%), N/A (1,032), NULL (14), nine negative values including -1, 484 zeros, and 557 values of 999.",
+      "recommendation": "Treat SQL null and trimmed, case-insensitive empty, NULL, and N/A as missing. Accept signed integer syntax only, then reject negative or out-of-int32 values. Preserve 0 and 999 and add sla_requires_confirmation only for those values.",
+      "rationale": "The approved rule retains 0 and 999 despite 999 being an IQR outlier in the profile. A confirmation flag surfaces their unresolved meaning without discarding them."
+    },
+    {
+      "column": "quality_flags",
+      "observation": "The silver schema specifies quality_flags as an array, but the supplied profile does not report its null rate or existing values.",
+      "recommendation": "Append applicable flags to an existing array. If the column is absent or null, produce the applicable new flags, or an empty array.",
+      "rationale": "Appending preserves upstream quality information while making this component's findings available downstream."
+    }
+  ],
+  "assumptions": [
+    "Input cost and sla_hours are strings; surrounding whitespace is trimmed.",
+    "A single leading dollar sign followed by zero or more spaces is accepted. Currency remains unknown; no currency interpretation or conversion is applied.",
+    "Scientific notation is rejected. Decimal syntax and excess-precision checks are evaluated on the textual representation.",
+    "Existing quality_flags, if present, is an array<string>.",
+    "SLA 0/999 meaning, source timezone, and common currency remain open questions; this component does not resolve them."
+  ],
+  "code": "from pyspark.sql import functions as F\nfrom pyspark.sql.types import ArrayType, StringType\n\n\ndef transform(df):\n    \"\"\"Normalize cost and SLA values and append their quality flags.\"\"\"\n    cost_raw = F.trim(F.col(\"cost\"))\n    cost_text = F.trim(F.regexp_replace(cost_raw, r\"^[$] *\", \"\"))\n    sla_text = F.trim(F.col(\"sla_hours\"))\n\n    cost_missing = F.coalesce(\n        cost_raw.isNull() | F.upper(cost_raw).isin(\"\", \"NULL\", \"N/A\", \"TBD\"),\n        F.lit(False),\n    )\n    sla_missing = F.coalesce(\n        sla_text.isNull() | F.upper(sla_text).isin(\"\", \"NULL\", \"N/A\"),\n        F.lit(False),\n    )\n\n    cost_syntax = cost_text.rlike(r\"^[+-]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)$\")\n    cost_num = cost_text.try_cast(\"decimal(18,2)\")\n    fraction = F.regexp_extract(cost_text, r\"[.]([0-9]*)$\", 1)\n    excess_nonzero = F.substring(fraction, 3, 100000).rlike(r\"[1-9]\")\n    # Inspect original digits so values such as -0.001 are not rounded to zero.\n    negative_nonzero = (\n        cost_text.rlike(r\"^-\")\n        & F.regexp_replace(cost_text, r\"[^0-9]\", \"\").rlike(r\"[1-9]\")\n    )\n    cost_invalid = F.coalesce(\n        (~cost_missing)\n        & (\n            (~cost_syntax)\n            | cost_num.isNull()\n            | negative_nonzero\n            | excess_nonzero\n        ),\n        F.lit(False),\n    )\n\n    sla_syntax = sla_text.rlike(r\"^[+-]?[0-9]+$\")\n    sla_num = sla_text.try_cast(\"bigint\")\n    sla_invalid = F.coalesce(\n        (~sla_missing)\n        & (\n            (~sla_syntax)\n            | sla_num.isNull()\n            | (sla_num < 0)\n            | (sla_num > 2147483647)\n        ),\n        F.lit(False),\n    )\n    sla_confirm = F.coalesce(\n        (~sla_missing) & (~sla_invalid) & sla_num.isin(0, 999),\n        F.lit(False),\n    )\n\n    empty_flags = F.array().cast(ArrayType(StringType()))\n\n    def flag(condition, name):\n        return F.when(condition, F.array(F.lit(name))).otherwise(empty_flags)\n\n    additions = F.concat(\n        flag(cost_missing, \"cost_missing\"),\n        flag(cost_invalid, \"cost_invalid\"),\n        flag(sla_missing, \"sla_missing\"),\n        flag(sla_invalid, \"sla_invalid\"),\n        flag(sla_confirm, \"sla_requires_confirmation\"),\n    )\n    prior = (\n        F.coalesce(F.col(\"quality_flags\"), empty_flags)\n        if \"quality_flags\" in df.columns\n        else empty_flags\n    )\n    replacements = {\n        \"cost\": F.when(\n            cost_missing | cost_invalid, F.lit(None).cast(\"decimal(18,2)\")\n        ).otherwise(cost_num).alias(\"cost\"),\n        \"sla_hours\": F.when(\n            sla_missing | sla_invalid, F.lit(None).cast(\"int\")\n        ).otherwise(sla_num.cast(\"int\")).alias(\"sla_hours\"),\n        \"quality_flags\": F.concat(prior, additions).alias(\"quality_flags\"),\n    }\n    projection = [replacements.get(name, F.col(name)) for name in df.columns]\n    if \"quality_flags\" not in df.columns:\n        projection.append(replacements[\"quality_flags\"])\n    return df.select(*projection)",
+  "validation_cases": [
+    "Cost '12.50' remains valid; fractional part '50' has no digits beyond the first two.",
+    "Cost '.5', '.25', and '1.25' remain valid; their entire fractional parts are extracted and the substring after two positions is empty.",
+    "Cost '1.2300' remains valid because digits after the first two fractional places are zero.",
+    "Cost '0.001' and '.001' are invalid because a nonzero digit occurs after the first two fractional places.",
+    "Cost '-0.001' is invalid due to its negative nonzero value, even if decimal conversion would round it to zero.",
+    "SQL null and whitespace-only values produce null outputs and corresponding missing flags; configured missing tokens are recognized case-insensitively.",
+    "Cost '0' remains decimal zero; '14996.24' remains valid without a profile-derived cap.",
+    "Non-numeric, nonfinite, scientific notation, negative, and unrepresentable decimal(18,2) cost values produce null with cost_invalid.",
+    "SLA '-1', '4.0', nonnumeric text, and values outside int32 produce null with sla_invalid; '0' and '999' remain valid and receive sla_requires_confirmation.",
+    "Existing quality_flags values are retained and new flags appended; absent or null quality_flags yields an array.",
+    "Output types are decimal(18,2), integer, and array<string> for cost, sla_hours, and quality_flags respectively; unrelated columns are unchanged and row grain is preserved."
+  ]
+}

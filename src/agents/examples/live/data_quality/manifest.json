@@ -1,0 +1,12 @@
+{
+  "stage": "silver",
+  "order": 2,
+  "entrypoint": "candidate.py:transform",
+  "inputs": [
+    "bronze.raw_tickets"
+  ],
+  "outputs": [
+    "candidate.cost_sla"
+  ],
+  "status": "pending_human_review"
+}

@@ -1,0 +1,62 @@
+{
+  "summary": "Candidate building-operations view sourced from cleaned silver.tickets. It reports ticket volume, canonical status groups, critical unresolved work, and recorded-cost metrics; it does not include hourly SLA metrics.",
+  "grain": "One row per COALESCE(building, 'Unknown') value in silver.tickets.",
+  "rules": [
+    {
+      "column": "building",
+      "observation": "The source profile shows NULL building values.",
+      "recommendation": "Group by COALESCE(building, 'Unknown'); leave other building values unchanged.",
+      "rationale": "This retains tickets with NULL building values in a visible group without silently combining differently spelled or blank-string values."
+    },
+    {
+      "column": "status",
+      "observation": "Cleaned silver status values are exactly open, in_progress, pending_vendor, escalated, resolved, closed, or SQL NULL.",
+      "recommendation": "Count resolved and closed as terminal; count open, in_progress, pending_vendor, and escalated as unresolved; count SQL NULL separately as unknown. Do not normalize or reinterpret raw bronze labels.",
+      "rationale": "Using the canonical silver vocabulary prevents raw-label assumptions from misclassifying tickets. Unknown statuses remain visible, and terminal rate can use the known-status denominator."
+    },
+    {
+      "column": "priority",
+      "observation": "Priority values have case variation in the source profile.",
+      "recommendation": "Match critical priority case-insensitively after trimming, and count it only for the four known unresolved statuses.",
+      "rationale": "This avoids case-based omissions while limiting the metric to critical tickets that remain unresolved."
+    },
+    {
+      "column": "cost",
+      "observation": "The approved cleaning rule ensures silver cost is either nonnegative or NULL; zero is a recorded value. Currency is unspecified.",
+      "recommendation": "Use COUNT(cost), SUM(cost), and AVG(cost) directly. Leave aggregate sum and average NULL when a building has no recorded costs; calculate coverage against all tickets.",
+      "rationale": "COUNT(cost) includes recorded zero and excludes NULL. Using cleaned silver values respects the approved cleaning rule without reapplying bronze parsing or negative-cost handling."
+    },
+    {
+      "column": "terminal_rate_pct",
+      "observation": "SQL NULL status is counted separately from the canonical known statuses.",
+      "recommendation": "Divide terminal tickets by terminal plus unresolved tickets, returning NULL for a zero known-status denominator.",
+      "rationale": "The denominator includes all known-status tickets but excludes unknown status, as required."
+    },
+    {
+      "column": "hourly SLA metrics",
+      "observation": "Date/time precision and timezone uncertainties prevent reliable hourly measurements.",
+      "recommendation": "Do not include hourly SLA metrics in this view.",
+      "rationale": "This avoids implying unsupported timing precision or timezone certainty."
+    }
+  ],
+  "assumptions": [
+    "silver.tickets is the cleaned, trusted source for this candidate; its status values follow the stated exact canonical vocabulary and its cost values are nonnegative or NULL.",
+    "NULL building is the only building value mapped to 'Unknown'; blank strings and other labels remain distinct unless a separately reviewed rule changes this.",
+    "Percentages use a 0\u2013100 scale and are not rounded in the view.",
+    "Currency is unknown, so cost measures are recorded values and must not be interpreted as a particular currency.",
+    "Override or withhold this candidate if the silver cleaning contract changes, canonical status values differ, or the Unknown label would collide with an actual building value. Any such change should be explicitly reviewed rather than inferred from bronze labels."
+  ],
+  "code": "CREATE VIEW candidate.report AS\nSELECT\n    COALESCE(building, 'Unknown') AS building,\n    COUNT(*) AS total_tickets,\n    COUNT(*) FILTER (WHERE status IN ('resolved', 'closed')) AS terminal_tickets,\n    COUNT(*) FILTER (WHERE status IN ('open', 'in_progress', 'pending_vendor', 'escalated')) AS unresolved_tickets,\n    COUNT(*) FILTER (WHERE status IS NULL) AS unknown_status_tickets,\n    COUNT(*) FILTER (\n        WHERE LOWER(BTRIM(priority)) = 'critical'\n          AND status IN ('open', 'in_progress', 'pending_vendor', 'escalated')\n    ) AS critical_unresolved_tickets,\n    COUNT(cost) AS tickets_with_recorded_cost,\n    SUM(cost) AS total_recorded_cost,\n    AVG(cost) AS average_recorded_cost,\n    100.0 * COUNT(cost) / NULLIF(COUNT(*), 0) AS cost_coverage_pct,\n    100.0 * COUNT(*) FILTER (WHERE status IN ('resolved', 'closed'))\n        / NULLIF(COUNT(*) FILTER (\n            WHERE status IN ('open', 'in_progress', 'pending_vendor', 'escalated', 'resolved', 'closed')\n        ), 0) AS terminal_rate_pct\nFROM silver.tickets\nGROUP BY COALESCE(building, 'Unknown')",
+  "validation_cases": [
+    "Confirm the candidate returns one row for each distinct COALESCE(building, 'Unknown') value and retains a group for NULL buildings when present.",
+    "Reconcile the sum of total_tickets across output rows to COUNT(*) from silver.tickets.",
+    "For every building, verify terminal_tickets + unresolved_tickets + unknown_status_tickets equals total_tickets.",
+    "Verify terminal counts include only resolved and closed; unresolved counts include open, in_progress, pending_vendor, and escalated; SQL NULL statuses are counted as unknown.",
+    "Verify terminal_rate_pct is 100 times terminal_tickets divided by terminal_tickets plus unresolved_tickets, and is NULL when that known-status denominator is zero.",
+    "Verify COUNT(cost) includes zero and excludes NULL, and that total_recorded_cost and average_recorded_cost are NULL for a group with no recorded costs.",
+    "Verify cost_coverage_pct is 100 times tickets_with_recorded_cost divided by total_tickets, and is NULL when its denominator is zero.",
+    "Reconcile each building's cost count, sum, and average against silver.tickets using non-NULL cost values, without additional bronze parsing or cost filters.",
+    "Verify critical_unresolved_tickets counts trimmed, case-insensitive critical priority only for canonical unresolved statuses.",
+    "Confirm no hourly SLA metrics are produced; review the candidate if silver status or cost contracts, building naming conventions, or timezone/precision assumptions change."
+  ]
+}
