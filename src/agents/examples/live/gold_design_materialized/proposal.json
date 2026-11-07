@@ -1,0 +1,55 @@
+{
+  "summary": "Proposes a building-level PostgreSQL materialized view over silver.tickets. It uses the approved canonical status values, keeps unknown statuses separate, retains recorded zero costs, and excludes NULL or negative costs from cost metrics. No hourly SLA metrics are included. Refresh after source changes; deployment must determine refresh scheduling and whether concurrent refresh is needed. Currency remains unknown, so cost totals and averages should not be compared across currencies without confirmation.",
+  "grain": "One row per building, with SQL NULL building values grouped as 'Unknown'. Empty or whitespace-only building strings remain distinct values unless explicitly overridden.",
+  "rules": [
+    {
+      "column": "building",
+      "observation": "The profile reports six empty building values; the contract specifically calls for SQL NULL building values to be treated as 'Unknown'.",
+      "recommendation": "Group by COALESCE(t.building, 'Unknown'); do not additionally normalize empty strings or whitespace.",
+      "rationale": "This preserves source distinctions while ensuring NULL building values appear in the report."
+    },
+    {
+      "column": "status",
+      "observation": "Approved silver status values are open, in_progress, pending_vendor, escalated, resolved, and closed. Other values, including NULL, are unknown.",
+      "recommendation": "Match these canonical values exactly. Count resolved and closed as terminal; count open, in_progress, pending_vendor, and escalated as unresolved; count all other values separately as unknown. Use terminal plus unresolved tickets as the terminal-rate denominator.",
+      "rationale": "Exact canonical matching avoids misclassifying values such as in_progress and pending_vendor. Separating unknown values prevents them from being treated as unresolved or included in the rate denominator."
+    },
+    {
+      "column": "priority",
+      "observation": "The source profile shows casing variants of critical priority.",
+      "recommendation": "For critical_unresolved_tickets, compare trimmed, case-insensitive priority to critical, and require an approved unresolved status.",
+      "rationale": "This accommodates casing and surrounding whitespace variation without broadening the unresolved-status definition."
+    },
+    {
+      "column": "cost",
+      "observation": "The profile includes missing and invalid raw representations, zero values, and negative values. The approved rule says missing and negative costs are null while zero is retained; silver.tickets.cost is numeric.",
+      "recommendation": "Count, sum, and average non-NULL costs greater than or equal to zero. Count zero as recorded. Calculate cost coverage over all tickets; use NULL for zero denominators.",
+      "rationale": "This follows the approved cost treatment and keeps cost coverage distinct from the population with recorded costs. Currency is unknown, so no currency interpretation or conversion is proposed."
+    },
+    {
+      "column": "time and SLA",
+      "observation": "Date precision and timezone are not uniformly reliable, and SLA 0/999 meanings remain open questions.",
+      "recommendation": "Do not include hourly SLA metrics in this report.",
+      "rationale": "The available time information and unresolved SLA semantics do not support reliable hourly measures."
+    }
+  ],
+  "assumptions": [
+    "The approved canonical status values are the complete known-status set; no trimming or case normalization is applied to status values.",
+    "Only SQL NULL building values map to 'Unknown'; empty and whitespace-only strings are not overridden.",
+    "Negative costs are excluded defensively, consistent with the approved rule that they are invalid/null for cost reporting. No currency is assumed.",
+    "The materialized view requires refresh after source changes. Refresh scheduling and any concurrent-refresh prerequisites are deployment decisions; neither is asserted as configured."
+  ],
+  "code": "CREATE MATERIALIZED VIEW candidate.report AS SELECT COALESCE(t.building, 'Unknown') AS building, COUNT(*) AS total_tickets, COUNT(*) FILTER (WHERE t.status IN ('resolved', 'closed')) AS terminal_tickets, COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'pending_vendor', 'escalated')) AS unresolved_tickets, COUNT(*) FILTER (WHERE t.status IS NULL OR t.status NOT IN ('open', 'in_progress', 'pending_vendor', 'escalated', 'resolved', 'closed')) AS unknown_status_tickets, COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'pending_vendor', 'escalated') AND lower(btrim(t.priority)) = 'critical') AS critical_unresolved_tickets, COUNT(*) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS tickets_with_recorded_cost, SUM(t.cost) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS total_recorded_cost, AVG(t.cost) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS average_recorded_cost, 100.0 * COUNT(*) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) / NULLIF(COUNT(*), 0) AS cost_coverage_pct, 100.0 * COUNT(*) FILTER (WHERE t.status IN ('resolved', 'closed')) / NULLIF(COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'pending_vendor', 'escalated', 'resolved', 'closed')), 0) AS terminal_rate_pct FROM silver.tickets AS t GROUP BY COALESCE(t.building, 'Unknown')",
+  "validation_cases": [
+    "Check that the view exposes exactly the required columns, in the required order, and that each output row corresponds to one COALESCE(building, 'Unknown') group.",
+    "Reconcile SUM(total_tickets) across the view to COUNT(*) from silver.tickets; confirm a NULL-building group appears as 'Unknown' when source rows have NULL building.",
+    "For every building, verify total_tickets equals terminal_tickets plus unresolved_tickets plus unknown_status_tickets.",
+    "Verify status classification uses exactly the six canonical values: resolved/closed are terminal; open/in_progress/pending_vendor/escalated are unresolved; NULL and all other values are unknown.",
+    "Verify terminal_rate_pct is terminal_tickets divided by terminal plus unresolved tickets, multiplied by 100, and is NULL when there are no known-status tickets.",
+    "Verify critical_unresolved_tickets is a subset of unresolved_tickets and includes only priorities equal to critical after trimming and case normalization.",
+    "Verify tickets_with_recorded_cost counts non-NULL costs >= 0, including zero; NULL and negative costs do not contribute to cost count, sum, or average.",
+    "For each building, reconcile total_recorded_cost and average_recorded_cost to the qualifying cost values; both should be NULL when there are no qualifying recorded costs.",
+    "Verify cost_coverage_pct uses all tickets in the building as denominator and is NULL for a zero denominator.",
+    "After source changes, refresh the materialized view and repeat the group-count and ticket-total reconciliations."
+  ]
+}

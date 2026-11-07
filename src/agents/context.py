@@ -68,7 +68,9 @@ def build_context(connection, agent: str, instruction: str, feedback: str = "", 
         "knowledge_graph": json.loads(Path(__file__).with_name("knowledge.json").read_text()),
         "approved_rules": ["Keep zero cost; missing and negative costs are null with separate flags.",
             "SLA -1 is invalid; retain 0 and 999 and flag for confirmation.",
-            "Terminal means resolved or closed. Other known statuses are unresolved; null status is separate.",
+            "silver.tickets.status uses canonical values open, in_progress, pending_vendor, escalated, resolved, closed. "
+            "Use these exact values in silver queries, not the raw bronze spellings. "
+            "Terminal means resolved or closed; open, in_progress, pending_vendor and escalated are unresolved; SQL NULL is unknown.",
             "Cost coverage includes recorded zeros. Averages exclude missing costs. Currency is unknown.",
             "Unknown groups remain visible. Date-only precision and unknown timezones prevent hourly metrics.",
             "Do not merge people's identities. Applied migrations remain versioned."],

@@ -1,0 +1,22 @@
+{
+  "passed": true,
+  "fingerprint": "9796a0834fb61c43d21c1492067622f5690b42ab31c0eed3455f7bf7f7dfd226",
+  "checked_at": "2026-11-07T19:12:02.464016+00:00",
+  "groups": 19,
+  "tickets": 10254,
+  "recorded_cost_tickets": 6452,
+  "total_recorded_cost": "38365957.76",
+  "unknown_status_tickets": 4,
+  "canonical_status_tickets": {
+    "in_progress": 1788,
+    "pending_vendor": 1740
+  },
+  "checks": [
+    "actual materialized view created in disposable database from all silver report inputs",
+    "all report columns and every group/KPI value equal published gold.building_operations",
+    "ticket, cost and unknown-status totals reconcile with read-only silver snapshot",
+    "canonical underscore-separated statuses classified correctly",
+    "refresh preserves results for unchanged inputs",
+    "disposable database removed"
+  ]
+}

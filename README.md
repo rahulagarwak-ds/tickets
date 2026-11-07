@@ -39,7 +39,7 @@ Keep credentials outside Git. The CLI reads the environment directly.
 | psycopg 3.3.8 with binary extras | Transactional PostgreSQL ingestion; no local compilation |
 | LangGraph 1.2.20 | Agent workflows |
 | LangChain 1.4.9 | LLM integration |
-| langchain-openai 1.7.4 | Installed provider adapter; provider/model choice remains provisional |
+| langchain-openai 1.7.4 | OpenAI Responses adapter for the `gpt-6-luna` agents |
 
 Exact Python library versions are recorded in `uv.lock`. Java and PostgreSQL
 are managed separately from uv. The current pipeline does not require JDBC.
@@ -248,3 +248,9 @@ A fresh checkout of commit `181af3b` passed locked installation, database
 initialization, and a complete run against a disposable PostgreSQL database.
 Delivering the identical CSV under a second filename left every bronze, silver,
 gold, and migration table and reporting view identical to the first run.
+
+Both Luna agent candidates passed isolated fixtures and full-dataset comparisons.
+The Gold candidate materialized all 19 building groups from 10,254 silver tickets
+in a disposable database and matched every published report KPI. Exact inputs,
+outputs, approvals, review history and results are linked in the
+[agent assessment](src/agents/README.md#live-examples-and-honest-assessment).

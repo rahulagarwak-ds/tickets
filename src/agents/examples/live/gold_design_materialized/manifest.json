@@ -1,0 +1,12 @@
+{
+  "stage": "gold",
+  "order": 3,
+  "entrypoint": "candidate.sql",
+  "inputs": [
+    "silver.tickets"
+  ],
+  "outputs": [
+    "candidate.report"
+  ],
+  "status": "pending_human_review"
+}

@@ -4,7 +4,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import time
@@ -71,7 +70,6 @@ def evaluate_dq(directory: Path) -> None:
 def evaluate_gold(directory: Path) -> None:
     code = (directory / "candidate.sql").read_text()
     validate_code("gold_design", code)
-    query = re.sub(r"\s*CREATE\s+VIEW\s+candidate\.report\s+AS\s+", "", code, count=1, flags=re.I).strip().removesuffix(";")
     name = "ticket_agent_eval_" + uuid.uuid4().hex
     admin = DATABASE_CONFIG | {"dbname": "postgres"}
     with psycopg.connect(**admin, autocommit=True) as control:
@@ -83,10 +81,14 @@ def evaluate_gold(directory: Path) -> None:
                     SELECT * FROM (VALUES ('A','open','critical',0::numeric),
                     ('A','closed','low',100::numeric),('A',NULL,NULL,NULL),
                     (NULL,NULL,NULL,NULL)) v(building,status,priority,cost)""")
+                connection.execute("CREATE SCHEMA candidate")
+                connection.execute("SET LOCAL statement_timeout = '10s'")
+                connection.execute(code, prepare=True)
             with psycopg.connect(**(DATABASE_CONFIG | {"dbname": name})) as connection:
                 connection.execute("SET TRANSACTION READ ONLY")
                 connection.execute("SET LOCAL statement_timeout = '10s'")
-                cursor = connection.execute("SELECT * FROM (" + query + ") AS candidate_result LIMIT 1001", prepare=True)
+                assert connection.execute("SELECT COUNT(*) FROM pg_matviews WHERE schemaname = 'candidate' AND matviewname = 'report'").fetchone()[0] == 1, "materialized view creation"
+                cursor = connection.execute("SELECT * FROM candidate.report LIMIT 1001")
                 columns = [c.name for c in cursor.description]
                 assert columns == ["building", "total_tickets", "terminal_tickets", "unresolved_tickets", "unknown_status_tickets", "critical_unresolved_tickets", "tickets_with_recorded_cost", "total_recorded_cost", "average_recorded_cost", "cost_coverage_pct", "terminal_rate_pct"], "report columns"
                 actual = sorted(cursor.fetchall())
@@ -113,7 +115,7 @@ def evaluate_run(directory: Path) -> dict:
             result["checks"] = "13 value fixtures, types, identifiers, row preservation, empty input"
         else:
             evaluate_gold(directory)
-            result["checks"] = "grain, report columns, reconciliation, zero/missing cost, unknown groups, rate denominators"
+            result["checks"] = "materialized view creation, grain, report columns, reconciliation, zero/missing cost, unknown groups, rate denominators"
         result["passed"] = True
     except Exception as error:
         result.update(passed=False, error_type=type(error).__name__)

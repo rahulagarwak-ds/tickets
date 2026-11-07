@@ -33,6 +33,7 @@ def main() -> None:
         assert request.url.path == "/v1/responses"
         assert payload["model"] == "gpt-6-luna"
         assert payload["text"]["format"]["type"] == "json_schema"
+        assert all(status in json.dumps(payload) for status in ("in_progress", "pending_vendor")), "canonical silver statuses must reach the model"
         requests.append(payload)
         dq = "Data Quality agent" in json.dumps(payload)
         code = (examples / ("cost_sla.py" if dq else "building_report.sql")).read_text()
@@ -105,7 +106,8 @@ def main() -> None:
             raise AssertionError("Incorrect cost coverage passed evaluation")
         print("PASS evaluator rejects an approved but semantically wrong SQL candidate", flush=True)
     for agent, code in [("data_quality", "import os\ndef transform(df): return df"),
-                        ("gold_design", "CREATE VIEW candidate.report AS SELECT 1; DROP TABLE silver.tickets")]:
+                        ("gold_design", "CREATE VIEW candidate.report AS SELECT 1"),
+                        ("gold_design", "CREATE MATERIALIZED VIEW candidate.report AS SELECT 1; DROP TABLE silver.tickets")]:
         try:
             validate_code(agent, code)
         except ValueError:

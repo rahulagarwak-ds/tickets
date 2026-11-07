@@ -44,9 +44,9 @@ class State(TypedDict):
 
 def validate_code(agent: str, code: str) -> None:
     if agent == "gold_design":
-        body = re.sub(r"\s*CREATE\s+VIEW\s+candidate\.report\s+AS\s+", "", code, count=1, flags=re.I)
+        body = re.sub(r"\s*CREATE\s+MATERIALIZED\s+VIEW\s+candidate\.report\s+AS\s+", "", code, count=1, flags=re.I)
         if body == code or not body.lstrip().upper().startswith("SELECT"):
-            raise ValueError("Gold output must create candidate.report from SELECT")
+            raise ValueError("Gold output must create materialized view candidate.report from SELECT")
         if ";" in body.rstrip().removesuffix(";") or "--" in body or "/*" in body:
             raise ValueError("Gold output must contain a single uncommented statement")
     else:

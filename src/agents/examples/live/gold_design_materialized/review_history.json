@@ -1,0 +1,44 @@
+[
+  {
+    "run_id": "f2cf8bc0e19242628944623efea4c0e9",
+    "feedback": "",
+    "instruction": "Generate the approved building-operations report as a PostgreSQL materialized view. Use the supplied silver schema and canonical status values, explain the grain and KPI denominators, state trust/override conditions and refresh requirements, and preserve unknown groups and recorded zero costs.",
+    "summary": "Proposes a building-level materialized view from silver.tickets. Statuses are classified using the approved terminal rule; unrecognized or missing statuses are counted separately. Costs below zero are excluded as invalid, while recorded zero costs remain included in cost counts and averages.",
+    "code": "CREATE MATERIALIZED VIEW candidate.report AS SELECT COALESCE(t.building, 'Unknown') AS building, COUNT(*) AS total_tickets, COUNT(*) FILTER (WHERE lower(btrim(t.status)) IN ('resolved', 'closed')) AS terminal_tickets, COUNT(*) FILTER (WHERE lower(btrim(t.status)) IN ('open', 'in progress', 'pending vendor', 'escalated')) AS unresolved_tickets, COUNT(*) FILTER (WHERE t.status IS NULL OR lower(btrim(t.status)) NOT IN ('open', 'in progress', 'pending vendor', 'escalated', 'closed', 'resolved')) AS unknown_status_tickets, COUNT(*) FILTER (WHERE lower(btrim(t.status)) IN ('open', 'in progress', 'pending vendor', 'escalated') AND lower(btrim(t.priority)) = 'critical') AS critical_unresolved_tickets, COUNT(*) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS tickets_with_recorded_cost, SUM(t.cost) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS total_recorded_cost, AVG(t.cost) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS average_recorded_cost, 100.0 * COUNT(*) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) / NULLIF(COUNT(*), 0) AS cost_coverage_pct, 100.0 * COUNT(*) FILTER (WHERE lower(btrim(t.status)) IN ('resolved', 'closed')) / NULLIF(COUNT(*) FILTER (WHERE t.status IS NOT NULL AND lower(btrim(t.status)) IN ('open', 'in progress', 'pending vendor', 'escalated', 'closed', 'resolved')), 0) AS terminal_rate_pct FROM silver.tickets AS t GROUP BY COALESCE(t.building, 'Unknown')",
+    "usage": {
+      "input_tokens": 4741,
+      "output_tokens": 1438,
+      "total_tokens": 6179,
+      "input_token_details": {
+        "cache_creation": 4738,
+        "cache_read": 0
+      },
+      "output_token_details": {
+        "reasoning": 184
+      }
+    },
+    "elapsed_seconds": 14.902,
+    "source": "openai"
+  },
+  {
+    "run_id": "36243eed1b264248bc841552384553a2",
+    "feedback": "The previous proposal incorrectly used raw bronze status spellings with spaces. silver.tickets contains in_progress and pending_vendor, not in progress or pending vendor. Use the exact canonical status values now included in approved_rules; the previous spellings would misclassify 3528 tickets. Preserve the requested materialized-view contract and report calculations.",
+    "instruction": "Generate the approved building-operations report as a PostgreSQL materialized view. Use the supplied silver schema and canonical status values, explain the grain and KPI denominators, state trust/override conditions and refresh requirements, and preserve unknown groups and recorded zero costs.",
+    "summary": "Proposes a building-level PostgreSQL materialized view over silver.tickets. It uses the approved canonical status values, keeps unknown statuses separate, retains recorded zero costs, and excludes NULL or negative costs from cost metrics. No hourly SLA metrics are included. Refresh after source changes; deployment must determine refresh scheduling and whether concurrent refresh is needed. Currency remains unknown, so cost totals and averages should not be compared across currencies without confirmation.",
+    "code": "CREATE MATERIALIZED VIEW candidate.report AS SELECT COALESCE(t.building, 'Unknown') AS building, COUNT(*) AS total_tickets, COUNT(*) FILTER (WHERE t.status IN ('resolved', 'closed')) AS terminal_tickets, COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'pending_vendor', 'escalated')) AS unresolved_tickets, COUNT(*) FILTER (WHERE t.status IS NULL OR t.status NOT IN ('open', 'in_progress', 'pending_vendor', 'escalated', 'resolved', 'closed')) AS unknown_status_tickets, COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'pending_vendor', 'escalated') AND lower(btrim(t.priority)) = 'critical') AS critical_unresolved_tickets, COUNT(*) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS tickets_with_recorded_cost, SUM(t.cost) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS total_recorded_cost, AVG(t.cost) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) AS average_recorded_cost, 100.0 * COUNT(*) FILTER (WHERE t.cost IS NOT NULL AND t.cost >= 0) / NULLIF(COUNT(*), 0) AS cost_coverage_pct, 100.0 * COUNT(*) FILTER (WHERE t.status IN ('resolved', 'closed')) / NULLIF(COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'pending_vendor', 'escalated', 'resolved', 'closed')), 0) AS terminal_rate_pct FROM silver.tickets AS t GROUP BY COALESCE(t.building, 'Unknown')",
+    "usage": {
+      "input_tokens": 6172,
+      "output_tokens": 1440,
+      "total_tokens": 7612,
+      "input_token_details": {
+        "cache_creation": 6169,
+        "cache_read": 0
+      },
+      "output_token_details": {
+        "reasoning": 117
+      }
+    },
+    "elapsed_seconds": 13.851,
+    "source": "openai"
+  }
+]

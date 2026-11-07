@@ -23,12 +23,13 @@ flowchart LR
 | Agent | Generates | Why this task |
 | --- | --- | --- |
 | Data Quality | A standalone PySpark `transform(df)` for the cost/SLA silver component, supported by column observations and rule rationale | The profile includes negative costs, missing tokens and ambiguous SLA values. These provide measurable decisions beyond a generic cleaning description. |
-| Gold Design | `CREATE VIEW candidate.report AS SELECT ...` for building operations, with grain, assumptions and reconciliation cases | Known-status denominators, recorded zero cost and unknown groups give specific correctness checks. |
+| Gold Design | `CREATE MATERIALIZED VIEW candidate.report AS SELECT ...` for building operations, with grain, assumptions and reconciliation cases | Known-status denominators, recorded zero cost and unknown groups give specific correctness checks. |
 
 User instructions and revision feedback guide each proposal within these component
 contracts. Output includes `proposal.json`, candidate code and a manifest containing
 stage order, entrypoint, inputs and outputs. Context includes schemas, source batch
-hashes, a bronze profile, approved rules, open questions, and the small graph in
+hashes, a bronze profile, approved rules with canonical silver status values,
+open questions, and the small graph in
 `knowledge.json`. Gold's fact/dimension relationships and cost dependencies are
 explicit in that graph. Existing implementation code and evaluation answers are
 not sent in generation prompts. Revision requests include the prior proposal.
@@ -74,12 +75,15 @@ not automatically execute candidate files or consume candidate manifests.
 
 Structured output is validated with Pydantic. DQ code is checked with Python AST
 for its function, imports and obvious executable I/O. Gold code must be a single
-view definition with a SELECT body. These are screening checks, not a Python
+materialized view definition with a SELECT body. These are screening checks, not a Python
 security sandbox. A human must review executable code before approval. Approved
 Python runs in a separate process with a timeout and provider credentials removed
 from its environment. It still has the reviewer's local filesystem permissions.
-Gold's SELECT is evaluated in a read-only transaction with a statement timeout in
-a disposable database. The evaluated query supplies the proposed view's contents.
+Gold's reviewed DDL creates a materialized view in a disposable database with a
+statement timeout. Its stored results are then checked in a read-only transaction.
+This tests materialization as well as the report query; it is not a SQL sandbox.
+After integration, refresh the materialized view after silver changes to publish
+updated results; the existing pipeline is not changed by this agent workflow.
 
 DQ checks 13 fixtures covering missing tokens, zero, negative sentinels, currency
 prefixes, invalid amounts, decimal precision, integer overflow and SLA 0/999. It
@@ -104,7 +108,8 @@ uv run --locked python -m src.agents.selftest
 
 This exercises both LangGraph routes through the actual ChatOpenAI Responses
 serialization using a simulated HTTP endpoint. It then saves artifacts, checks
-approval, executes PySpark fixtures and the gold query, and rejects tampered runs.
+approval, executes PySpark fixtures and creates the gold materialized view, and
+rejects tampered runs and ordinary view definitions.
 It also verifies real bronze profiles, revision context, and invalid imports/SQL.
 An intentionally incorrect SQL candidate must fail the numeric checks.
 Temporary runs and the evaluation database are removed afterward.
@@ -122,17 +127,25 @@ output, manifest, token usage, approval fingerprint, evaluation and review histo
 | Agent | Recorded input and output | Full-data validation |
 | --- | --- | --- |
 | Data Quality | [Context](examples/live/data_quality/context.json), [proposal](examples/live/data_quality/proposal.json), [PySpark](examples/live/data_quality/candidate.py) | All 10,280 input rows matched the approved cost/SLA parsers and flags. Other fields and lineage were preserved. Cost yielded 6,452 valid, 3,621 missing and 207 invalid amounts. SLA yielded 6,144 ordinary values, 3,086 missing, 1,041 requiring confirmation and 9 invalid values. |
-| Gold Design | [Context](examples/live/gold_design/context.json), [proposal](examples/live/gold_design/proposal.json), [SQL](examples/live/gold_design/candidate.sql) | All columns and KPI values matched `gold.building_operations` across 19 groups and 10,254 accepted tickets. Counts and recorded costs reconciled to silver. |
+| Gold Design | [Context](examples/live/gold_design_materialized/context.json), [proposal](examples/live/gold_design_materialized/proposal.json), [SQL](examples/live/gold_design_materialized/candidate.sql) | The materialized view was created in a disposable database using all 10,254 silver report inputs. Every column and KPI matched `gold.building_operations` across 19 groups. Counts and recorded costs reconciled to silver; refresh preserved results for unchanged inputs. |
 
 The full comparison results are in each example's `full_dataset_evaluation.json`.
 `evaluation.json` records the isolated fixture results. `review_history.json`
 preserves earlier code, feedback, generation times and usage so the required
 corrections can be inspected alongside the final result.
 
+The [earlier Gold runs](examples/live/gold_design/review_history.json) retain
+their original regular-view SQL, approvals and fingerprints unchanged as historical
+evidence. The current example above verifies the materialized-view contract through
+a live model proposal, human approval, actual creation and full-data reconciliation.
+Project database access during the full comparison was read-only; materialization
+and refresh ran in a disposable database that was removed afterward.
+
 | Agent | Drafts | Total generation workflow time | Input / output tokens |
 | --- | ---: | ---: | ---: |
 | Data Quality | 5 | 96.826 seconds | 31,958 / 11,124 |
-| Gold Design | 2 | 33.001 seconds | 10,848 / 3,078 |
+| Gold Design (original regular view) | 2 | 33.001 seconds | 10,848 / 3,078 |
+| Gold Design (materialized view) | 2 | 28.753 seconds | 10,913 / 2,878 |
 
 Times sum the recorded generation calls and their local workflow overhead.
 They exclude reviewer time and evaluation. Tokens include all drafts and are
@@ -146,10 +159,14 @@ than writing the rule directly. The demonstration supports assisted drafting and
 review, with no demonstrated development-time saving.
 
 **Gold Design assessment.** It produced the requested report grain and most KPI
-calculations quickly. One correction was needed because it used raw status
-spellings instead of silver's canonical underscore-separated values. The second
-draft matched the published report. Its useful contribution was a structured SQL
-draft, but schema-aware review and denominator checks were still necessary.
+calculations quickly. The original regular-view draft needed one correction for
+raw status spellings. A fresh materialized-view draft repeated that mismatch;
+review caught it before execution because it would misclassify 3,528 tickets.
+Canonical silver status values were added to shared context and supplied in
+revision feedback. The second materialized-view draft passed fixture and full-data
+checks, including the 1,788 in_progress and 1,740 pending_vendor tickets. Its useful
+contribution was a structured SQL draft; review and corrections remained necessary,
+and no development-time saving was demonstrated.
 Trust follows the validated grain, vocabulary and reconciliation checks. Override
 the output when it guesses business meanings or contradicts approved rules.
 

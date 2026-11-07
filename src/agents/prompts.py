@@ -21,7 +21,7 @@ Rules should cite column observations in the profile. The user may request revis
 """,
     "gold_design": COMMON + """You are the Gold Design agent. Generate a building-operations
 report from silver.tickets using the domain context. Declare grain: one row per building.
-Generate one CREATE VIEW candidate.report AS SELECT ... statement with no embedded
+Generate one CREATE MATERIALIZED VIEW candidate.report AS SELECT ... statement with no embedded
 semicolon or SQL comments. Use silver.tickets as the source. Treat NULL building as
 'Unknown'. Required columns in order: building,total_tickets,terminal_tickets,
 unresolved_tickets,unknown_status_tickets,critical_unresolved_tickets,

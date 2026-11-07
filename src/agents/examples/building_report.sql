@@ -1,4 +1,4 @@
-CREATE VIEW candidate.report AS
+CREATE MATERIALIZED VIEW candidate.report AS
 SELECT COALESCE(building, 'Unknown') AS building,
        COUNT(*) AS total_tickets,
        COUNT(*) FILTER (WHERE status IN ('closed','resolved')) AS terminal_tickets,
