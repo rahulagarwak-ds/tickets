@@ -1,8 +1,8 @@
 # Ticket medallion
 
-The pipeline ingests CSV files into bronze and rebuilds cleaned silver tables
-in PostgreSQL using PySpark and psycopg. Gold and assessment agents are not implemented yet.
-No Docker or Compose is used.
+The local pipeline uses PySpark and PostgreSQL to turn facilities-support tickets
+into reports on workload by building and recorded cost by maintenance category.
+Agent workflows are pending.
 
 ## Prerequisites
 
@@ -51,7 +51,7 @@ the runner creates the configured database directly and does not execute or
 record that helper. The first transactional migration creates the history table.
 Initialization and pipeline runs share a database lock so they cannot overlap.
 
-## Run bronze → silver
+## Run bronze → silver → gold
 
 Place incoming CSV files directly inside `data/`, then run from the repository root:
 
@@ -60,8 +60,9 @@ uv run --locked python -m src.cli
 ```
 
 The command ingests and archives pending CSVs, then rebuilds `silver.tickets` and
-`silver.rejected_tickets` from all bronze records. Silver also refreshes when
-there are no new files. One Spark session and database connection serve the run.
+`silver.rejected_tickets` from all bronze records. Gold then publishes one fact
+per accepted ticket. With an empty inbox, the same command rebuilds silver and
+gold from existing data. One Spark session and database connection serve the run.
 
 The default connection is host `::1`, port `5432`, database `ticket_medallion`,
 and the operating-system username. Override it using `PGHOST`, `PGPORT`,
@@ -88,7 +89,7 @@ The runner does not automatically load `.env` files.
 - A PostgreSQL session lock prevents concurrent CLI runs. Logs report filenames,
   inserted counts, skips, safe validation explanations, and database error codes
   (SQLSTATE). Raw database error messages are withheld to avoid exposing credentials
-  or ticket content. With no pending CSVs, bronze is skipped and silver still refreshes.
+  or ticket content.
 
 Incoming files must be fully written before running the pipeline and remain
 unchanged during processing. Archiving uses a hard link followed by source removal,
@@ -138,6 +139,50 @@ refresh preserves the previous published silver tables; completed bronze ingesti
 and archived source files remain intact. Rerun the command after resolving the
 failure; silver rebuilds from bronze without needing the incoming files restored.
 
+## Gold models
+
+```mermaid
+flowchart LR
+    CSV["data/*.csv"] --> B["bronze.raw_tickets"]
+    B --> S["silver.tickets"]
+    B --> R["silver.rejected_tickets"]
+    S --> F["gold.fact_ticket"]
+    S --> D["Building, category, priority, status and date dimensions"]
+    D --> F
+    F --> K["gold.ticket_kpis"]
+    K --> O["gold.building_operations"]
+    K --> C["gold.category_performance"]
+```
+
+`gold.fact_ticket` stores the current status and cost through a status key and a
+nullable recorded amount, plus the ticket ID and bronze lineage. It joins to
+`dim_building`, `dim_category`, `dim_priority`, and `dim_status` by stable keys.
+Each has an Unknown member (key 0). Created and resolved dates both reference
+`dim_date`, using the calendar day of the silver clock reading.
+
+Each gold refresh inserts new buildings and dates and replaces the fact rows
+in one transaction. A failure rolls back that publication. Confirmed dimension
+corrections use Type 1 updates in place, preserving the key. A building rename
+also requires the corresponding silver mapping so future loads reuse that key.
+
+| Reporting view | Grain and purpose |
+| --- | --- |
+| `gold.ticket_kpis` | One row per accepted ticket. Supplies shared indicators and supports drill-down to individual tickets. |
+| `gold.building_operations` | One row per building. Shows where unresolved and critical work is concentrated. |
+| `gold.category_performance` | One row per maintenance category. Shows which kinds of work account for demand and recorded cost. |
+
+Both summaries group the same ticket indicators, including Unknown groups.
+
+| KPI | Calculation within each group |
+| --- | --- |
+| Total, terminal, unresolved, unknown status | Count all tickets. Count resolved/closed as terminal, open/in progress/pending vendor/escalated as unresolved, and unknown status separately. The three counts sum to the total. |
+| Critical unresolved | Count unresolved tickets whose priority is critical. |
+| Terminal rate (%) | 100 × terminal tickets / tickets with known status. A zero denominator yields null. |
+| Tickets with recorded cost, cost coverage (%) | Count non-null costs, including zero. Coverage is 100 × that count / total tickets. |
+| Total and average recorded cost | Sum the recorded amounts. Divide that sum by tickets with recorded cost for the average. Both return null for groups with no recorded amounts. |
+
+Cost figures use source units. Each report describes the current ticket snapshot.
+
 ## Verified behavior
 
 On 7 November 2026, the supplied CSV was ingested on macOS ARM64 with Java
@@ -158,3 +203,8 @@ The combined command was then run against the project database on 7 November 202
 field and bronze reference was verified, including 49 category/description repairs
 and one category recovery. A second run produced identical silver rows, flags,
 lineage, and rejections while preserving bronze metadata and the archived CSV.
+
+Gold contained 10,254 facts on 7 November 2026. All KPIs matched independent
+aggregations of silver for each of the 19 building groups and 12 category groups.
+The 6,452 tickets with recorded costs totaled 38,365,957.76 source units
+(62.92% cost coverage).

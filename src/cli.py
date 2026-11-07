@@ -8,6 +8,7 @@ from pyspark.sql import SparkSession
 
 from .pipeline.bronze import BronzeValidationError, process_file
 from .pipeline.config import DATA_DIR, DATABASE_CONFIG
+from .pipeline.gold import refresh_gold
 from .pipeline.silver import SilverValidationError, refresh_silver
 
 
@@ -31,7 +32,7 @@ def main() -> int:
                 if path.is_file() and path.suffix.lower() == ".csv"
             )
             if not paths:
-                logger.info("No pending CSV files; silver will refresh from existing bronze")
+                logger.info("No pending CSV files. Refreshing silver and gold from existing data.")
 
             os.environ["PYSPARK_PYTHON"] = sys.executable
             spark = (
@@ -54,6 +55,8 @@ def main() -> int:
                 stage = "silver"
                 current_file = None
                 refresh_silver(connection, spark)
+                stage = "gold"
+                refresh_gold(connection)
                 logger.info("Pipeline completed")
             finally:
                 spark.stop()
